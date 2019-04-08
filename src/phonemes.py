@@ -24,12 +24,10 @@ def unique(data_dir, files):
     words = []
     for file in files:
         with open(data_dir + file + '.txt', 'r') as f:
-            # Get all lines except the first (empty line).
-            lines = [line.strip().split('\t') for line in f][1:]
-            # Add transcriptions words.
+            # Get all lines. Add transcriptions words. Add ground truth words.
+            lines = [line.strip().split('\t') for line in f]
             words.extend([word for line in lines for word in
                           line[4].replace(' ', '|').split('|')])
-            # Add ground truth words.
             words.extend([word for line in lines for word in line[-1].split()])
     return set(words)
 
@@ -65,32 +63,38 @@ def number2words(inflect_engine, candidate):
     return result.split()
 
 
-def preprocess(words):
+def preprocess(words, return_raw_list=False):
     """
     Converts all numeric strings into words (e.g. '1' => 'one), removes all
-    punctuation, removes all whitespace-only words, and returns a sorted set
-    of the resulting words.
+    punctuation, removes all whitespace-only words, and returns either a raw
+    list or a sorted set of the resulting words.
 
-    :param words: the set of words to preprocess
-    :return: a sorted set of preprocessed words
+    :param words: a sequence words to preprocess
+    :param return_raw_list: whether to return a raw list or a sorted set words
+    :return: a sorted set or a raw list of preprocessed words
     """
     p = inflect.engine()
-    words = set([x for w in words for x in number2words(p, w)])
+    words = [x for w in words for x in number2words(p, w)]
+    words = words if return_raw_list else set(words)
     # Remove all punctuation.
     words = [w.translate(str.maketrans('', '', punctuation)) for w in words]
-    # Remove all entries with whitespace only and create a sorted set.
-    return sorted(set([w for w in words if len(w.strip()) > 0]))
+    # Remove all entries with whitespace only.
+    words = [w for w in words if len(w.strip()) > 0]
+    return words if return_raw_list else sorted(set(words))
 
 
-def write_phonemes(words, size, file):
+def write_phonemes(words, size, file, n=1):
     """
     For each word in the given set of words, use the CMU phoneme dictionary to
-    find all phonemic transcriptions of the word, and write them to the given
-    file.
+    find up to n phonemic transcriptions of the word, and write this mapping to
+    the given file.
 
     :param words: the set of words to process
     :param size: max number of words to send to the CMU website in one chunk
     :param file: the file to which to write the results
+    :param n: the number of alternative phonemic transcripts to write; the
+        actual number of alternatives written can be smaller if CMU finds fewer
+        than n alternatives for a given word; n < 1 means write them all
     """
     result = collections.defaultdict(list)
     num = len(list(range(0, len(words), size)))
@@ -116,7 +120,8 @@ def write_phonemes(words, size, file):
     # Add dictionary to file.
     with open(file, 'w') as f:
         for word, phonemes in result.items():
-            print('\t'.join([word] + phonemes), file=f)
+            k = n if n > 0 else len(phonemes)
+            print('\t'.join([word] + phonemes[:k]), file=f)
 
 
 if __name__ == '__main__':
