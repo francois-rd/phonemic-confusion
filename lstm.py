@@ -7,7 +7,7 @@ Revisions:
     2019-04-09      (AY)    Added tensors2packedseq() / packedseq2tensors()
                             Added Embedding layer 
                             Modified create_sample_data(), train(), etc. to match data types
-    
+                            Fixed shuffling of X in tensor2packedseq(), changed ordering to pad_lists()
 Helpful Links:
     PyTorch LSTM outputs : https://stackoverflow.com/questions/48302810/whats-the-difference-between-hidden-and-output-in-pytorch-lstm
     Example of PackedSequence : https://towardsdatascience.com/taming-lstms-variable-sized-mini-batches-and-why-pytorch-is-good-for-your-health-61d35642972e
@@ -127,7 +127,7 @@ class lstm_rnn(nn.Module):
 
     def tensors2packedseq(self, tensors, seq_lens):
         """
-        Converts a 3d padded tensor (with ORIGINALLY variable sequence lengths) to a PackedSequence
+        Converts an ordered 3d padded tensor (with ORIGINALLY variable sequence lengths) to a PackedSequence
         datatype)
         Arguments:
             tensors (torch.tensor) : padded input tensor of shape (batch_size, max_seq_len, input_dim)
@@ -137,16 +137,12 @@ class lstm_rnn(nn.Module):
         """
         
         #   convert 3d tensor to list of 2d tensors
-        seq_lens_idx = np.flip(np.argsort(seq_lens), axis=0).tolist()     # descending indices based on seq_lens
-        
         tensor_list = []
-        seq_lens_list = []
-        for idx in seq_lens_idx:                    #   for every sample in batch
+        for idx in range(tensors.shape[0]):                    #   for every sample in batch
             tensor_list.append(tensors[idx, :, :])
-            seq_lens_list.append(seq_lens[idx])
                 
         packedseq = nn.utils.rnn.pad_sequence(tensor_list)  #   tensor (seq_len, batch_size, input_dim)
-        packedseq = nn.utils.rnn.pack_padded_sequence(packedseq, seq_lens_list)
+        packedseq = nn.utils.rnn.pack_padded_sequence(packedseq, seq_lens)
     
         return packedseq
     
@@ -167,19 +163,29 @@ class lstm_rnn(nn.Module):
 
 def pad_lists(lists, pad_token=0):
     """
-    Pads lists of different lengths to all have the same length (max length)
+    Pads unordered lists of different lengths to all have the same length (max length) and orders
+    length descendingly
     Arguments:
         lists : list of 1d lists with different lengths (list[list[int]])
         pad_token : padding value (int)
     Returns:
-        lists (list[list[int]]) : List of padded 1d lists with equal lengths 
+        lists (list[list[int]]) : List of padded 1d lists with equal lengths, ordered descendingly
+                from original lengths
         seq_lens (list[int]) : List of sequence lengths of corresponding lists (i.e. len(lst))
     """
     seq_lens = [len(lst) for lst in lists]
+        
     max_seq_len = max(seq_lens)
-    lists = [lst + [pad_token]*(max_seq_len - len(lst)) for lst in lists]
+    ordered_seq_lens = []
+    ordered_lists = []
     
-    return lists, seq_lens
+    seq_lens_idx = np.flip(np.argsort(seq_lens), axis=0).tolist()     # descending indices based on seq_lens    
+
+    for idx in seq_lens_idx:                    #   for every sample in batch
+        ordered_lists.append(lists[idx] + [pad_token] * (max_seq_len - len(lists[idx])))
+        ordered_seq_lens.append(seq_lens[idx])
+    
+    return ordered_lists, ordered_seq_lens
 
 
 def train(X_train, y_train, clf, params):
