@@ -8,6 +8,7 @@ Revisions:
                             Added Embedding layer 
                             Modified create_sample_data(), train(), etc. to match data types
                             Fixed shuffling of X in tensor2packedseq(), changed ordering to pad_lists()
+                            Added ordering for y to pad_lists()
 Helpful Links:
     PyTorch LSTM outputs : https://stackoverflow.com/questions/48302810/whats-the-difference-between-hidden-and-output-in-pytorch-lstm
     Example of PackedSequence : https://towardsdatascience.com/taming-lstms-variable-sized-mini-batches-and-why-pytorch-is-good-for-your-health-61d35642972e
@@ -169,9 +170,10 @@ def pad_lists(lists, pad_token=0):
         lists : list of 1d lists with different lengths (list[list[int]])
         pad_token : padding value (int)
     Returns:
-        lists (list[list[int]]) : List of padded 1d lists with equal lengths, ordered descendingly
+        ordered_lists (list[list[int]]) : List of padded 1d lists with equal lengths, ordered descendingly
                 from original lengths
-        seq_lens (list[int]) : List of sequence lengths of corresponding lists (i.e. len(lst))
+        ordered_seq_lens (list[int]) : List of sequence lengths of corresponding lists (i.e. len(lst))
+        seq_lens_idx (list[int]) : Order of original indices in descending sequence length
     """
     seq_lens = [len(lst) for lst in lists]
         
@@ -185,7 +187,7 @@ def pad_lists(lists, pad_token=0):
         ordered_lists.append(lists[idx] + [pad_token] * (max_seq_len - len(lists[idx])))
         ordered_seq_lens.append(seq_lens[idx])
     
-    return ordered_lists, ordered_seq_lens
+    return ordered_lists, ordered_seq_lens, seq_lens_idx
 
 
 def train(X_train, y_train, clf, params):
@@ -209,16 +211,19 @@ def train(X_train, y_train, clf, params):
 
     for epoch in range(0, num_epochs):
         
-        #   get batch
-        X_train_batch, X_train_seq_lens = pad_lists(X_train)
-        X_train_batch = torch.tensor(X_train_batch)
+        #   get batch and order
+        X_train, y_train = create_sample_data(params, shuffle=True)
+        
+        X_train_batch, X_train_seq_lens, seq_lens_idx = pad_lists(X_train)
+        X_train_batch = torch.tensor(X_train_batch)        
+        y_train_batch = torch.tensor([[y_train[idx]] for idx in seq_lens_idx])
 
         #   Zero the gradient of the optimizer
         optimizer.zero_grad()
         
         #   Forward pass
         y_pred = clf.forward(X_train_batch, X_train_seq_lens)
-        loss = clf.compute_loss(y_pred, y_train)
+        loss = clf.compute_loss(y_pred, y_train_batch)
         
         print("Epoch: " + str(epoch) + "    Loss: " + str(loss.item()))
     
@@ -227,15 +232,17 @@ def train(X_train, y_train, clf, params):
 
 def evaluate(X_test, y_test, clf, params):
     
-    X_test, X_test_seq_lens = pad_lists(X_test)
-    X_test = torch.tensor(X_test)
+    X_test_batch, X_test_seq_lens, seq_lens_idx = pad_lists(X_test)
+    X_test_batch = torch.tensor(X_test_batch)
+    y_test_batch = torch.tensor([[y_test[idx]] for idx in seq_lens_idx])
+
     
-    y_pred = clf.forward(X_test, X_test_seq_lens)
-    loss = clf.compute_loss(y_pred, y_test)
+    y_pred = clf.forward(X_test_batch, X_test_seq_lens)
+    loss = clf.compute_loss(y_pred, y_test_batch)
     
     return loss, y_pred
 
-def create_sample_data(params, min_seq_len, max_seq_len):
+def create_sample_data(params, min_seq_len=1, max_seq_len=20, shuffle=False):
     """
     **Don't use this if you don't know it.  Buggy and only for verifying code runs.**
     
@@ -246,6 +253,7 @@ def create_sample_data(params, min_seq_len, max_seq_len):
         params (dict) : contains dimension and batch parameters
         min_seq_len (int) : length of the shortest possible sequence
         max_seq_len (int) : length of the longest possible sequence
+        shuffle (boolean) : whether to keep samples ordered by descending seq_len (False) or not (True)
     Returns:
         List of integer sequences in X (List[list[int]])
         torch.tensor(batch_size, output_dim) : y labels corresponding to X
@@ -258,8 +266,10 @@ def create_sample_data(params, min_seq_len, max_seq_len):
     X = []
     
     #   generate random sorted seq_len
-    seq_len = torch.randint(min_seq_len, max_seq_len, (batch_size,))       
-    seq_len = seq_len.sort(descending=True)[0]
+    seq_len = torch.randint(min_seq_len, max_seq_len, (batch_size,))      
+    
+    if shuffle is False:
+        seq_len = seq_len.sort(descending=True)[0]
     
     #   create y
     y = torch.ones((batch_size,output_dim))
@@ -278,9 +288,6 @@ def create_sample_data(params, min_seq_len, max_seq_len):
 
 def main_fcn(params, verbose=False):
     
-    min_seq_len = 1
-    max_seq_len = 20
-    
     #   initialize classifier
     if verbose:
         print("Initializing classifier...")
@@ -289,29 +296,31 @@ def main_fcn(params, verbose=False):
     clf = lstm_rnn(params)
     
     #   Train model
-    X_train, y_train = create_sample_data(params, min_seq_len, max_seq_len)
-    X_test, y_test = create_sample_data(params, min_seq_len, max_seq_len)
+    X_train, y_train = create_sample_data(params, shuffle=True)
+    X_test, y_test = create_sample_data(params, shuffle=True)
     
     train(X_train, y_train, clf, params)
     
     #   Evaluate model
     loss, output = evaluate(X_test, y_test, clf, params)
-    print(loss)
-    print(output)
+    for sample in range(0, len(y_test)):
+        print("X : ", X_test[sample])
+        print("Predict: ", float(output[sample]), "    Label: ", float(y_test[sample]))
+    print("Loss: ", str(loss.item()))
     
 if __name__ == '__main__':
     
     torch.manual_seed = 1
-    vocab_size = 26
+    vocab_size = 4
     
     params = {
-            'input_dim':        vocab_size,
+            'input_dim':        5,
             'embed_dim':        vocab_size,
             'hidden_dim':       20,            
             'output_dim':       1,              
             'num_layers':       5,
-            'batch_size':       50,
-            'num_epochs':       200,
+            'batch_size':       20,
+            'num_epochs':       125,
             'learning_rate':    0.05,
             'learning_decay':   0.9,
             'bidirectional':    True
