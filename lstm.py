@@ -9,6 +9,7 @@ Revisions:
                             Modified create_sample_data(), train(), etc. to match data types
                             Fixed shuffling of X in tensor2packedseq(), changed ordering to pad_lists()
                             Added ordering for y to pad_lists()
+                            Added X_test, y_test output for evaluate()
 Helpful Links:
     PyTorch LSTM outputs : https://stackoverflow.com/questions/48302810/whats-the-difference-between-hidden-and-output-in-pytorch-lstm
     Example of PackedSequence : https://towardsdatascience.com/taming-lstms-variable-sized-mini-batches-and-why-pytorch-is-good-for-your-health-61d35642972e
@@ -240,7 +241,7 @@ def evaluate(X_test, y_test, clf, params):
     y_pred = clf.forward(X_test_batch, X_test_seq_lens)
     loss = clf.compute_loss(y_pred, y_test_batch)
     
-    return loss, y_pred
+    return loss, y_pred, X_test_batch, y_test_batch
 
 def create_sample_data(params, min_seq_len=1, max_seq_len=20, shuffle=False):
     """
@@ -301,11 +302,10 @@ def main_fcn(params, verbose=False):
     
     train(X_train, y_train, clf, params)
     
-    #   Evaluate model
-    loss, output = evaluate(X_test, y_test, clf, params)
+    #   Evaluate model - outputs X_test,  y_test because ordered inside of evaluate
+    loss, y_pred, X_test, y_test = evaluate(X_test, y_test, clf, params)
     for sample in range(0, len(y_test)):
-        print("X : ", X_test[sample])
-        print("Predict: ", float(output[sample]), "    Label: ", float(y_test[sample]))
+        print("Predict: ", float(y_pred[sample]), "    Label: ", float(y_test[sample]))
     print("Loss: ", str(loss.item()))
     
 if __name__ == '__main__':
