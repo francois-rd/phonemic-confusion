@@ -10,9 +10,16 @@ Revisions:
                             Fixed shuffling of X in tensor2packedseq(), changed ordering to pad_lists()
                             Added ordering for y to pad_lists()
                             Added X_test, y_test output for evaluate()
+    2019-04-10      (AY)    Added in non-scalar experiments (params['scalar']) and support functions for 1-hot
+                            Modified existing functions for both params['scalar'] = True and False
+                            Fixed bug in bidirectional scalar - now concatenates leftmost reverse hidden state 
+                                and rightmost forward hidden state
+
 Helpful Links:
     PyTorch LSTM outputs : https://stackoverflow.com/questions/48302810/whats-the-difference-between-hidden-and-output-in-pytorch-lstm
     Example of PackedSequence : https://towardsdatascience.com/taming-lstms-variable-sized-mini-batches-and-why-pytorch-is-good-for-your-health-61d35642972e
+    Bidirectional LSTM Output : https://towardsdatascience.com/understanding-bidirectional-rnn-in-pytorch-5bd25a5dd66
+    Bidirectional LSTM Output h_n : https://discuss.pytorch.org/t/how-can-i-know-which-part-of-h-n-of-bidirectional-rnn-is-for-backward-process/3883
 """
 import torch
 import torch.nn as nn
@@ -31,6 +38,7 @@ class lstm_rnn(nn.Module):
         self.output_dim = params['output_dim']
         self.num_layers = params['num_layers']
         self.bidirectional = params['bidirectional']
+        self.scalar = params['scalar']
         
         self.batch_size = params['batch_size']
         self.hidden_states = self.init_hidden_states(self.bidirectional)
@@ -42,7 +50,11 @@ class lstm_rnn(nn.Module):
         #   LSTM hidden layer
         self.lstm = nn.LSTM(self.embed_dim, self.hidden_dim, self.num_layers, 
                             bidirectional=self.bidirectional)
-        self.linear = nn.Linear(self.hidden_dim, self.output_dim)
+        
+        if self.bidirectional is True:
+            self.linear = nn.Linear(self.hidden_dim*2, self.output_dim)
+        else:
+            self.linear = nn.Linear(self.hidden_dim, self.output_dim)
     
     def init_hidden_states(self, bidirection=False):
         """
@@ -87,7 +99,6 @@ class lstm_rnn(nn.Module):
         #   output shape (batch_size x max(seq_lens) x input_dim)
         X = self.embedding(X)
 
-        #X = X.transpose(dim0=0, dim1=1)     #   shape (seq_lens x batch_size, input_dim)
         X = self.tensors2packedseq(X, seq_lens)
     
         #   lstm_out is output for each t in sequence length T
@@ -111,20 +122,59 @@ class lstm_rnn(nn.Module):
         #           final_hidden_states[-1] however will only output UP TO the seq_len
         #               where there is input (i.e. ignore all NULL outputs)
         
-        y_pred = torch.sigmoid(self.linear(final_hidden_states[-1]))
+        if self.scalar is True:
+            if self.bidirectional is True:
+                #   stack the hidden_states of the last reverse layer [-1] (leftmost) and the
+                #   last forward layer[-2] (rightmost)
+                final_hidden_state = torch.cat((final_hidden_states[-1], 
+                                                final_hidden_states[-2]), dim=1)
+            else:
+                final_hidden_state = final_hidden_states[-1]
+            y_pred = torch.sigmoid(self.linear(final_hidden_state))
+        else:
+            #   bidirectional lstm is already concatenated
+            y_pred = F.softmax(self.linear(lstm_out), dim=2)
         
         return y_pred
         
-    def compute_loss(self, y, target):
+    def compute_loss(self, y, target, seq_lens=[]):
         """
         Compute the loss function using the MSE Loss function
         Arguments:
-            y (torch.tensor) : outputs of classifier for input (batch_size, output_dim)
-            target (torch.tensor) : ground truth labels for input (batch_size, output_dim)
+            y (torch.tensor) : (padded) outputs of classifier for input (batch_size, output_dim) 
+                (self.scalar=True) or (max(seq_len), batch_size, output_dim) (self.scalar=False)
+            target (torch.tensor) : (padded) ground truth labels for input (batch_size, output_dim)
+                (self.scalar=True) or (max(seq_len), batch_size, output_dim) (self.scalar=False)
+            seq_lens (list[int]) : seq_len of each sample in output (only for self.scalar=False)
         Returns:
-            loss (torch.tensor) : MSE loss of y
+            loss (torch.tensor) : MSE loss of y (self.scalar=True)
         """
-        return F.mse_loss(y, target)
+        if self.scalar is True:
+            return F.mse_loss(y, target)
+        else:
+            if len(seq_lens) != y.shape[1] or y.shape[1] != target.shape[1]: 
+                
+                print("Error: Batch size mismatched!!!")
+                print("len(seq_lens): ", len(seq_lens))
+                print("y.shape[1]: ", y.shape[1])
+                print("target.shape[1]: ", target.shape[1])
+                
+                return torch.tensor([-1])       #   causes an error :D
+            
+            for idx in range(0, y.shape[1]):         #   for every sample in batch
+                #   remove padding and flatten to 1D                
+                y_tensor1D = y[:seq_lens[idx], idx, :].flatten()
+                target_tensor1D = target[:seq_lens[idx], idx, :].flatten()
+                
+                #   concatenate into 1D
+                if idx == 0:        #    if first sample
+                    y_flatten = y_tensor1D
+                    target_flatten = target_tensor1D
+                else:
+                    y_flatten = torch.cat((y_flatten, y_tensor1D))
+                    target_flatten = torch.cat((target_flatten, target_tensor1D))
+            
+            return F.binary_cross_entropy(y_flatten, target_flatten)
 
 
     def tensors2packedseq(self, tensors, seq_lens):
@@ -163,27 +213,86 @@ class lstm_rnn(nn.Module):
         
         return tensors, seq_lens
 
-def pad_lists(lists, pad_token=0):
+def lists2onehottensors(lists, dim, pad_token=-1):
+    """
+    Converts padded list of lists of integers to 3d tensor (max(seq_len), batch_size, dim)
+    Arguments:
+        lists (list[list[int]]) : list of integers lists with all internal lists of equal length
+        dim (int) : number of output dimensions for 1 hot tensor
+        pad_token (int) : integer value which indicates an empty 1-hot vector (default -1 = no pad_token)
+    Returns:
+        tensor (torch.tensor) : padded 3d tensor of shape (max(seq_len),, batch_size, dim)
+    """
+    
+    tensor_list = []
+    
+    for sample_idx in range(0, len(lists)):       #   for every sample in the batch
+        sample = lists[sample_idx]
+        seq_len = len(sample)
+        tensor = torch.zeros((dim, seq_len))     #   dim = # rows, seq_len = # cols
+        for idx in range(0, seq_len):
+            if pad_token != sample[idx]:
+                tensor[sample[idx], idx] = 1
+        tensor_list.append(tensor)
+
+    tensors = torch.stack(tensor_list)          #   shape(batch_size, dim, seq_len)
+
+    #   reshape to (seq_len, batch_size, dim)
+    tensors = tensors.transpose(dim0=0, dim1=2).transpose(dim0=1, dim1=2)
+    
+    return tensors    
+
+def onehottensors2classlist(onehottensor, seq_lens):
+    """
+    Converts a 3d tensor (seq_len, batch_size, output_dim) to a 2d class list (list[batch_size  * list[seq_len]])
+        where each class is a unique integer
+    Arguments:
+        onehottensor (torch.tensor) : 3d padded one-hot tensor of different sequence lengths of
+            shape (max(seq_lens), batch_size, output_dim)
+        seq_lens (list[int]) : length of each of the sequences without padding 
+            (i.e. onehottensor.shape[1] without padding)
+    Returns:
+        batch_list (list[list[int]]) : list of class lists with each internal list corresponding
+            to a sequence and each class in the internal list corresponding to a class for 
+            each step of the sequence
+    """
+    batch_list = []
+    
+    for idx in range(0, onehottensor.shape[1]):     # for every tensor sample in batch
+        integer_list = []
+        tensor2d = onehottensor[:, idx, :]          # shape (seq_len, dim)
+        for step in range(0, seq_lens[idx]):
+            #   get max index of tensor2d allowing dim0
+            max_class = tensor2d[step, :].max(dim=0)
+            integer_list.append(int(max_class[1]))
+        batch_list.append(integer_list)
+    
+    return batch_list
+
+def pad_lists(lists, pad_token=0, seq_lens_idx=[]):
     """
     Pads unordered lists of different lengths to all have the same length (max length) and orders
     length descendingly
     Arguments:
         lists : list of 1d lists with different lengths (list[list[int]])
         pad_token : padding value (int)
+        seq_lens_idx : list of sorted indices (list[int])
     Returns:
         ordered_lists (list[list[int]]) : List of padded 1d lists with equal lengths, ordered descendingly
                 from original lengths
         ordered_seq_lens (list[int]) : List of sequence lengths of corresponding lists (i.e. len(lst))
         seq_lens_idx (list[int]) : Order of original indices in descending sequence length
     """
+    
     seq_lens = [len(lst) for lst in lists]
         
     max_seq_len = max(seq_lens)
     ordered_seq_lens = []
     ordered_lists = []
-    
-    seq_lens_idx = np.flip(np.argsort(seq_lens), axis=0).tolist()     # descending indices based on seq_lens    
 
+    if len(seq_lens_idx) == 0:
+        seq_lens_idx = np.flip(np.argsort(seq_lens), axis=0).tolist()     # descending indices based on seq_lens    
+    
     for idx in seq_lens_idx:                    #   for every sample in batch
         ordered_lists.append(lists[idx] + [pad_token] * (max_seq_len - len(lists[idx])))
         ordered_seq_lens.append(seq_lens[idx])
@@ -206,6 +315,8 @@ def train(X_train, y_train, clf, params):
     
     num_epochs = params['num_epochs']
     lr = params['learning_rate']
+    scalar = params['scalar']
+    output_dim = params['output_dim']
     #   Create optimizer
     
     optimizer = torch.optim.Adam(list(clf.parameters()), lr=lr)
@@ -213,18 +324,25 @@ def train(X_train, y_train, clf, params):
     for epoch in range(0, num_epochs):
         
         #   get batch and order
-        X_train, y_train = create_sample_data(params, shuffle=True)
+        X_train, y_train = create_sample_data(params, scalar = scalar, shuffle=True)
         
         X_train_batch, X_train_seq_lens, seq_lens_idx = pad_lists(X_train)
-        X_train_batch = torch.tensor(X_train_batch)        
-        y_train_batch = torch.tensor([[y_train[idx]] for idx in seq_lens_idx])
-
+        X_train_batch = torch.tensor(X_train_batch)   
+                
+        if scalar is True:
+            #   sort y_train_batch
+            y_train_batch = torch.tensor([[y_train[idx]] for idx in seq_lens_idx])
+        else:
+            #   convert list[list[int]] to padded 3d tensor (seq_len, batch_size, output_dim)
+            y_train_batch, y_train_seq_lens, seq_lens_idx = pad_lists(y_train, seq_lens_idx)
+            y_train_batch = lists2onehottensors(y_train_batch, dim=output_dim, pad_token=0)
+            
         #   Zero the gradient of the optimizer
         optimizer.zero_grad()
         
         #   Forward pass
         y_pred = clf.forward(X_train_batch, X_train_seq_lens)
-        loss = clf.compute_loss(y_pred, y_train_batch)
+        loss = clf.compute_loss(y_pred, y_train_batch, X_train_seq_lens)
         
         print("Epoch: " + str(epoch) + "    Loss: " + str(loss.item()))
     
@@ -233,17 +351,30 @@ def train(X_train, y_train, clf, params):
 
 def evaluate(X_test, y_test, clf, params):
     
+    scalar = params['scalar']
+    output_dim = params['output_dim']
+    
     X_test_batch, X_test_seq_lens, seq_lens_idx = pad_lists(X_test)
     X_test_batch = torch.tensor(X_test_batch)
-    y_test_batch = torch.tensor([[y_test[idx]] for idx in seq_lens_idx])
-
-    
+    if scalar is True:
+        #   sort y_train_batch
+        y_test_batch = torch.tensor([[y_test[idx]] for idx in seq_lens_idx])
+    else:
+        #   convert list[list[int]] to padded 3d tensor (seq_len, batch_size, output_dim)
+        y_test_batch, y_test_seq_lens, seq_lens_idx = pad_lists(y_test, seq_lens_idx)
+        y_test_batch = lists2onehottensors(y_test_batch, dim=output_dim, pad_token=0)
+        
     y_pred = clf.forward(X_test_batch, X_test_seq_lens)
-    loss = clf.compute_loss(y_pred, y_test_batch)
+    loss = clf.compute_loss(y_pred, y_test_batch, X_test_seq_lens)
     
+    if scalar is False:
+        #   convert softmax y_pred and y to 1d list
+        y_test_batch = onehottensors2classlist(y_test_batch, X_test_seq_lens)
+        y_pred = onehottensors2classlist(y_pred, X_test_seq_lens)
+        
     return loss, y_pred, X_test_batch, y_test_batch
 
-def create_sample_data(params, min_seq_len=1, max_seq_len=20, shuffle=False):
+def create_sample_data(params, min_seq_len=3, max_seq_len=10, scalar=True, shuffle=False):
     """
     **Don't use this if you don't know it.  Buggy and only for verifying code runs.**
     
@@ -254,76 +385,107 @@ def create_sample_data(params, min_seq_len=1, max_seq_len=20, shuffle=False):
         params (dict) : contains dimension and batch parameters
         min_seq_len (int) : length of the shortest possible sequence
         max_seq_len (int) : length of the longest possible sequence
+        scalar (boolean) : whether y is a binary output at the end of the entire sequence (True)
+            or y is seq_len one-hot vectors (i.e. every sequence step has an output) (False)
         shuffle (boolean) : whether to keep samples ordered by descending seq_len (False) or not (True)
     Returns:
         List of integer sequences in X (List[list[int]])
         torch.tensor(batch_size, output_dim) : y labels corresponding to X
     """
-    
+
     vocabSize = params['embed_dim']
     output_dim = params['output_dim']
     batch_size = params['batch_size']
            
-    X = []
-    
     #   generate random sorted seq_len
     seq_len = torch.randint(min_seq_len, max_seq_len, (batch_size,))      
     
     if shuffle is False:
+        print("Shuffle is false.")
         seq_len = seq_len.sort(descending=True)[0]
     
     #   create y
-    y = torch.ones((batch_size,output_dim))
-    y[int(batch_size/2):, ] = 0
+    if scalar is True:
+        y = torch.ones((batch_size,output_dim))
+        y[int(batch_size/2):, ] = 0
+    else:
+        #   create list of lists of integers y of different sequence lengths
+        y = []
+        for i in range(0, batch_size):
+            if i > int(batch_size/2)-1:
+                sequence = list(range(0, seq_len[i]))      #   ascending consecutive integers
+            else:
+                sequence = list(range(seq_len[i], 0, -1))  #   descending consecutive integers
+            
+            #   make sure all values in sequence is less than output_dim
+            sequence = [value if value < output_dim else output_dim-1 for value in sequence]
+
+            y.append(sequence)
     
-    #   create data sequences of different sequence lengths
+    #   create data sequences X of different sequence lengths
+    X = []
     for i in range(0, batch_size):
         if i > int(batch_size/2)-1:
             sequence = [random.randrange(1, int(vocabSize/2)) for _ in range(seq_len[i])]
         else:
             sequence = [random.randrange(int(vocabSize/2), vocabSize) for _ in range(seq_len[i])]
-    
         X.append(sequence)
 
     return X, y
 
 def main_fcn(params, verbose=False):
     
+    scalar = params['scalar']
+    
     #   initialize classifier
     if verbose:
         print("Initializing classifier...")
-        
+    
+    #   checks
+    if scalar is True and params['output_dim'] != 1:
+        print("WARNING: Scalar is True but output dim is NOT set to 1...")
+        print("Automatically setting to 1...")
+        params['output_dim'] = 1
+    
     #   Create model
     clf = lstm_rnn(params)
     
     #   Train model
-    X_train, y_train = create_sample_data(params, shuffle=True)
-    X_test, y_test = create_sample_data(params, shuffle=True)
+    X_train, y_train = create_sample_data(params, scalar=scalar, shuffle=True)
+    X_test, y_test = create_sample_data(params, scalar=scalar, shuffle=True)
     
     train(X_train, y_train, clf, params)
     
     #   Evaluate model - outputs X_test,  y_test because ordered inside of evaluate
     loss, y_pred, X_test, y_test = evaluate(X_test, y_test, clf, params)
-    for sample in range(0, len(y_test)):
-        print("Predict: ", float(y_pred[sample]), "    Label: ", float(y_test[sample]))
-    print("Loss: ", str(loss.item()))
+        
+    if scalar is True:
+        for sample in range(0, len(y_test)):
+            print("Label: ", float(y_test[sample]), "    Predict: ", float(y_pred[sample]))
+        print("Loss: ", str(loss.item()))
+    else:
+        for sample in range(0, len(y_test)):
+            print("Label: ", y_test[sample])
+            print("Predict: ", y_pred[sample])
+        print("Loss: ", str(loss.item()))
     
 if __name__ == '__main__':
     
-    torch.manual_seed = 1
-    vocab_size = 4
+    #torch.manual_seed = 1
+    vocab_size = 20
     
     params = {
-            'input_dim':        5,
+            'input_dim':        vocab_size,
             'embed_dim':        vocab_size,
-            'hidden_dim':       20,            
-            'output_dim':       1,              
-            'num_layers':       5,
-            'batch_size':       20,
-            'num_epochs':       125,
+            'hidden_dim':       25,            
+            'output_dim':       vocab_size,              
+            'num_layers':       1,
+            'batch_size':       15,
+            'num_epochs':       300,
             'learning_rate':    0.05,
             'learning_decay':   0.9,
-            'bidirectional':    True
+            'bidirectional':    True,
+            'scalar':           False
     }
     
     main_fcn(params, verbose=True)
