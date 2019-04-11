@@ -1,0 +1,8 @@
+1	emma	acr	chp01_utt001.wav	hello there i tim|irrelevant	0.97484809|0|0|0|0	hello i am tom
+2	emma	acr	chp01_utt001.wav	help there i tim|irrelevant	0.97484809|0|0|0|0	hello i am tom
+3	emma	acr	chp01_utt001.wav	hello there|irrelevant	0.97484809|0|0|0|0	hello
+4	emma	acr	chp01_utt001.wav	help there|irrelevant	0.97484809|0|0|0|0	hello
+5	emma	acr	chp01_utt001.wav	hello|irrelevant	0.97484809|0|0|0|0	hello there
+6	emma	acr	chp01_utt001.wav	help|irrelevant	0.97484809|0|0|0|0	hello there
+7	emma	acr	chp01_utt001.wav	o there|irrelevant	0.97484809|0|0|0|0	o
+8	emma	acr	chp01_utt001.wav	i there|irrelevant	0.97484809|0|0|0|0	o
