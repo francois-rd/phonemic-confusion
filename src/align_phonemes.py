@@ -1,8 +1,11 @@
 from src.phonemes import DATA_DIR, FILES, PHONEME_OUT, preprocess
 import numpy as np
 
+NULL, DEL, INS_SAME, INS_DIFF = 'NULL', 'DEL', 'INS_SAME', 'INS_DIFF'
 ALIGNMENT_OPTS = ['none', 'hypothesis']
-OUTPUT_OPTS = ['full', 'binary', 'scalar']
+OUTPUT_OPTS = ['full', 'abridged', 'binary', 'scalar']
+NONE_CODES = {'match': 1, 'sub': 2, 'del': 3, 'ins': 4}
+HYP_CODES = {'match': 1, 'sub': 2, 'del': 3, 'ins_same': 4, 'ins_diff': 5}
 
 
 def load_data(data_dir, files):
@@ -20,6 +23,8 @@ def load_data(data_dir, files):
             lines = [line.strip().split('\t') for line in f]
             hyps.extend([line[4].split('|')[0] for line in lines])
             refs.extend([line[-1] for line in lines])
+    # Remove all empty hypotheses.
+    refs, hyps = [r for r, h in zip(refs, hyps) if h], [h for h in hyps if h]
     return refs, hyps
 
 
@@ -96,10 +101,10 @@ def align_one(ref, hyp):
             alignment.append((ref[i], hyp[j]))
         elif b[i, j] == up:
             i -= 1
-            alignment.append((ref[i], 'DEL'))
+            alignment.append((ref[i], DEL))
         else:
             j -= 1
-            alignment.append(('NULL', hyp[j]))
+            alignment.append((NULL, hyp[j]))
     alignment.reverse()
     return alignment
 
@@ -131,33 +136,60 @@ class DataRecorder:
             for output in OUTPUT_OPTS:
                 self._modify_data_and_record(aligned_ref_hyp, alignment, output)
 
-    def _modify_data_and_record(self, aligned_ref_hyp, alignment, output):
-        ref = [r for r, _ in aligned_ref_hyp if r != 'NULL']
+    def _modify_data_and_record(self, ref_hyp, alignment, output):
+        ref = [r for r, _ in ref_hyp if r != NULL]
         if alignment == 'none':
             if output == 'full':
-                hyp = ' '.join([h for _, h in aligned_ref_hyp if h != 'DEL'])
+                hyp = ' '.join([h for _, h in ref_hyp if h != DEL])
+            elif output == 'abridged':
+                hyp = []
+                for r, h in ref_hyp:
+                    if r == h:
+                        hyp.append(NONE_CODES['match'])
+                    elif r == NULL:
+                        hyp.append(NONE_CODES['ins'])
+                    elif h == DEL:
+                        hyp.append(NONE_CODES['del'])
+                    else:
+                        hyp.append(NONE_CODES['sub'])
+                hyp = ' '.join([str(h) for h in hyp])
             elif output == 'binary':
-                hyp = ' '.join([str(int(r != h)) for r, h in aligned_ref_hyp
-                                if h != 'DEL'])
+                hyp = ' '.join([str(int(r != h) + 1) for r, h in ref_hyp])
             else:  # output == 'scalar'
-                hyp = str(np.count_nonzero([r != h for r, h in aligned_ref_hyp
-                                            if h != 'DEL']))
+                hyp = str(np.count_nonzero([r != h for r, h in ref_hyp]))
         else:  # alignment == 'hypothesis'
             hyp = []
-            for i in range(len(aligned_ref_hyp)):
-                r, h = aligned_ref_hyp[i]
-                if (r == 'NULL' and i == len(aligned_ref_hyp) - 1) \
-                        or (r != 'NULL' and i < len(aligned_ref_hyp) - 1
-                            and aligned_ref_hyp[i + 1][0] == 'NULL'):
-                    hyp.append('INS')
-                elif r == 'NULL':
+            start = 0
+            while ref_hyp[start][0] == NULL:
+                start += 1
+            for i in range(len(ref_hyp)):
+                (r, h), not_last = ref_hyp[i], i < len(ref_hyp) - 1
+                if r == NULL:
                     continue
+                elif i == start > 0:
+                    hyp.append(INS_SAME if r == h else INS_DIFF)
+                elif r != 'NULL' and not_last and ref_hyp[i + 1][0] == NULL:
+                    hyp.append(INS_SAME if r == h else INS_DIFF)
                 else:
                     hyp.append(h)
             if output == 'full':
-                hyp = ' '.join(hyp)
+                hyp = ' '.join([str(h) for h in hyp])
+            elif output == 'abridged':
+                hyp_tmp = []
+                for r, h in zip(ref, hyp):
+                    if r == h:
+                        hyp_tmp.append(HYP_CODES['match'])
+                    elif h == INS_SAME:
+                        hyp_tmp.append(HYP_CODES['ins_same'])
+                    elif h == INS_DIFF:
+                        hyp_tmp.append(HYP_CODES['ins_diff'])
+                    elif h == DEL:
+                        hyp_tmp.append(HYP_CODES['del'])
+                    else:
+                        hyp_tmp.append(HYP_CODES['sub'])
+                hyp = ' '.join([str(h) for h in hyp_tmp])
             elif output == 'binary':
-                hyp = ' '.join([str(int(r != h)) for r, h in zip(ref, hyp)])
+                hyp = ' '.join([str(int(r != h) + 1) for r, h in zip(ref, hyp)])
             else:  # output == 'scalar'
                 hyp = str(np.count_nonzero([r != h for r, h in zip(ref, hyp)]))
         print(' '.join(ref) + "\t" + hyp, file=self.files[(alignment, output)])
@@ -185,10 +217,13 @@ def align_all(refs, hyps, phonemes, data_dir, verbose=True):
     data_recorder = DataRecorder(data_dir)
     i, n = 0, len(refs)
     for ref, hyp in zip(refs, hyps):
-        if i % (n // 10) == 0 and verbose:
+        if i % (n // min(10, n)) == 0 and verbose:
             print("Aligned {} of {}".format(i, n))
         i += 1
         ref, hyp = text2phonemes(ref, phonemes), text2phonemes(hyp, phonemes)
+        if not ref or not hyp:
+            print('Skipping due to emtpy hypothesis or reference.')
+            continue
         data_recorder(align_one(ref, hyp))
     data_recorder.close()
 
