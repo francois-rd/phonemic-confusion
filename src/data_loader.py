@@ -49,6 +49,7 @@ class DataLoader:
                 lines.append('{} {} {}'.format(DEL, INS_SAME, INS_DIFF))
             phonemes = sorted(set([p for line in lines for p in line.split()]))
         phoneme_to_int = {p: i + 1 for i, p in enumerate(phonemes)}
+        self.max_vocab_size = len(phoneme_to_int) + 1
         # Create the int2phoneme dictionary.
         if output == 'binary':
             self.int_to_phoneme = {1: 'match', 2: 'not_match'}
