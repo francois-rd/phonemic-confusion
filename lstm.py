@@ -16,6 +16,10 @@ Revisions:
                                 and rightmost forward hidden state
     2019-04-11      (AY)    Add in DataLoader
                             Change list2onehottensors() / onehottensors2classlist() to have faster method using sklearn
+    2019-04-12      (AY)    Removed warnings
+                            Modified for new Dataloader
+                            Made GPU compatible (cuda.()) for 'full' - doesn't work for 'binary' or 'abridged'
+                            
 
 Helpful Links:
     PyTorch LSTM outputs : https://stackoverflow.com/questions/48302810/whats-the-difference-between-hidden-and-output-in-pytorch-lstm
@@ -25,16 +29,24 @@ Helpful Links:
     One Hot Encoding (Sklearn) : https://machinelearningmastery.com/how-to-one-hot-encode-sequence-data-in-python/
     
 """
+import os, sys
+import warnings
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import random
 import src.phonemes
-from src.data_loader import DataLoader, phoneme2int
+from src.data_loader import DataLoader
 from sklearn.preprocessing import OneHotEncoder
 import datetime as dt
+from src.utils import int2phoneme
 
+#   hide warnings
+if not sys.warnoptions:
+    warnings.simplefilter('ignore')
+
+#os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 DATA_DIR = "./data/transcripts/"
 PHONEME_OUT = "./data/phonemes.txt"
@@ -51,10 +63,10 @@ class lstm_rnn(nn.Module):
         self.num_layers = params['num_layers']
         self.bidirectional = params['bidirectional']
         self.scalar = params['scalar']
-        
         self.batch_size = params['batch_size']
-        self.hidden_states = self.init_hidden_states(self.bidirectional)
-        self.cell_state = self.init_cell_state(self.bidirectional)
+        
+        #self.hidden_states = self.init_hidden_states(self.bidirectional).cuda()
+        #self.cell_state = self.init_cell_state(self.bidirectional).cuda()
         
         #   Embedding layer - size vocabSize x vocabSize
         self.embedding = nn.Embedding(self.input_dim, self.embed_dim)
@@ -68,7 +80,7 @@ class lstm_rnn(nn.Module):
         else:
             self.linear = nn.Linear(self.hidden_dim, self.output_dim)
     
-    def init_hidden_states(self, bidirection=False):
+    def init_hidden_states(self, batch_size, bidirection=False):
         """
         Initialize hidden states to random.
         Arguments:
@@ -77,11 +89,11 @@ class lstm_rnn(nn.Module):
             hidden state (torch.tensor) : hidden states per layer (1 state per layer)
         """
         if bidirection is True:
-             return torch.randn(self.num_layers*2, self.batch_size, self.hidden_dim)
+             return torch.randn(self.num_layers*2, batch_size, self.hidden_dim)
         else:
-            return torch.randn(self.num_layers, self.batch_size, self.hidden_dim)
+             return torch.randn(self.num_layers, batch_size, self.hidden_dim)
     
-    def init_cell_state(self, bidirection=False):
+    def init_cell_state(self, batch_size, bidirection=False):
         """
         Initialize cell states to 0.
         Arguments:
@@ -90,9 +102,9 @@ class lstm_rnn(nn.Module):
             cell state (torch.array) : cell states per layer (1 state per layer)
         """
         if bidirection is True:
-             return torch.zeros(self.num_layers*2, self.batch_size, self.hidden_dim)
+             return torch.zeros(self.num_layers*2, batch_size, self.hidden_dim)
         else:
-            return torch.zeros(self.num_layers, self.batch_size, self.hidden_dim)
+             return torch.zeros(self.num_layers, batch_size, self.hidden_dim)
         
     def forward(self, X, seq_lens):
         """
@@ -103,22 +115,24 @@ class lstm_rnn(nn.Module):
             y_pred:   predicted output of each sequence step
         """
         
+        batch_size = X.shape[0]
+        
         #   reset the LSTM network
-        self.hidden_states = self.init_hidden_states(self.bidirectional)
-        self.cell_state = self.init_cell_state(self.bidirectional)
+        self.hidden_states = self.init_hidden_states(batch_size, self.bidirectional).cuda()
+        self.cell_state = self.init_cell_state(batch_size, self.bidirectional).cuda()
         
         #   X input shape (batch_size, max(seq_lens))
         #   output shape (batch_size x max(seq_lens) x input_dim)
-        X = self.embedding(X)
+        X = self.embedding(X.cuda())
 
         X = self.tensors2packedseq(X, seq_lens)
     
         #   lstm_out is output for each t in sequence length T
         #   final_hidden_states are hidden_states for t=T
         #   final_cell_state is cell_state for t=T
-        
+
         lstm_out, (final_hidden_states, final_cell_state) = self.lstm(X, 
-                  (self.hidden_states, self.cell_state))
+                  (self.hidden_states.cuda(), self.cell_state.cuda()))
                 
         #   convert lstm_out back to tensor from packedsequence
         lstm_out, seq_lens = self.packedseq2tensors(lstm_out)
@@ -199,12 +213,13 @@ class lstm_rnn(nn.Module):
         Returns:
             packedseq (PackedSequence) : a PackedSequence type of batch of input tensors 
         """
-        
+
         #   convert 3d tensor to list of 2d tensors
         tensor_list = []
         for idx in range(tensors.shape[0]):                    #   for every sample in batch
             tensor_list.append(tensors[idx, :, :])
-                
+        
+        
         packedseq = nn.utils.rnn.pad_sequence(tensor_list)  #   tensor (seq_len, batch_size, input_dim)
         packedseq = nn.utils.rnn.pack_padded_sequence(packedseq, seq_lens)
     
@@ -242,7 +257,7 @@ def lists2onehottensors(lists, dim, onehot_encoder, pad_token=0):
         sample = lists[sample_idx]
         sample = np.array(sample)       #   convert to np.array
         sample = sample.reshape(len(sample), 1)
-        encoded_sample = torch.tensor(onehot_encoder.fit_transform(sample)).float()
+        encoded_sample = torch.tensor(onehot_encoder.fit_transform(sample)).float().cuda()
         tensor_list.append(encoded_sample)   #  shape(seq_len, dim)
     
     tensors = torch.stack(tensor_list)          #   shape(batch_size, seq_len, dim)
@@ -323,31 +338,56 @@ def train(clf, onehot_encoder, params):
     output_dim = params['output_dim']
     
     #   Create training data DataLoader
-    dl_train = DataLoader(DATA_DIR, phoneme2int(PHONEME_OUT), params['align'],
+    dl_train = DataLoader(DATA_DIR, PHONEME_OUT, params['align'],
                     params['data_type'], 'train', batch_size = params['batch_size'])
-    dl_val = DataLoader(DATA_DIR, phoneme2int(PHONEME_OUT), params['align'],
+    dl_val = DataLoader(DATA_DIR, PHONEME_OUT, params['align'],
                     params['data_type'], 'val', batch_size = params['batch_size'])
+    int_to_pho_dict = dl_val.int_to_phoneme
     
     #   Create optimizer
+
     optimizer = torch.optim.Adam(list(clf.parameters()), lr=lr)
+
+    #   consistent validation case
+
+    X_fixed_batch, y_fixed_batch = dl_val.__iter__().__next__()                 #   gets a single batch
+    X_fixed = X_fixed_batch[2]
+    y_fixed = y_fixed_batch[2]
+    
+    print(len(X_fixed))
+    print(len(y_fixed))
+    
+    y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
+
+    X_fixed_phoneme = int2phoneme(int_to_pho_dict, X_fixed)
+    y_fixed_phoneme = int2phoneme(int_to_pho_dict, y_fixed)
+    y_pred = int2phoneme(int_to_pho_dict, y_pred)
+    print("X_fixed: ", X_fixed_phoneme)
+    print("y_fixed: ", y_fixed_phoneme)
+    print("y_pred: ", y_pred)
 
     for epoch in range(0, num_epochs):
         batch_idx = 0        
+        print("Epoch: " + str(epoch) + "     " + str(dt.datetime.now()))
+        
+        sum_train_loss = 0
+        sum_train_iters = 0
+        
         for X_train, y_train in dl_train:
-            print("Batch Idx: ", batch_idx, "     ", dt.datetime.now())
+            #print("Batch Idx: ", batch_idx, "     ", dt.datetime.now())
             X_train_batch, X_train_seq_lens, seq_lens_idx = pad_lists(X_train)
-            X_train_batch = torch.tensor(X_train_batch)   
+            X_train_batch = torch.tensor(X_train_batch).cuda()   
                     
             if scalar is True:
                 #   sort y_train_batch
-                y_train_batch = torch.tensor([[y_train[idx]] for idx in seq_lens_idx]).float()
+                y_train_batch = torch.tensor([[y_train[idx]] for idx in seq_lens_idx]).float().cuda()
             else:
                 #   convert list[list[int]] to padded 3d tensor (seq_len, batch_size, output_dim)                
                 y_train_batch, y_train_seq_lens, seq_lens_idx = pad_lists(y_train, 
                                                                           seq_lens_idx=seq_lens_idx)
                 y_train_batch = lists2onehottensors(y_train_batch, output_dim, onehot_encoder,
                                                     pad_token=0)
-                
+            
             #   Zero the gradient of the optimizer
             optimizer.zero_grad()
             
@@ -355,46 +395,99 @@ def train(clf, onehot_encoder, params):
             y_pred = clf.forward(X_train_batch, X_train_seq_lens)
             loss = clf.compute_loss(y_pred, y_train_batch, X_train_seq_lens)
         
+            sum_train_loss += loss.item()
+            sum_train_iters += 1
+        
             loss.backward()     #   backward pass
             optimizer.step()    #   update gradient step
             
             batch_idx += 1
 
-        #   Validation Loss
-        X_val, y_val = dl_val.__iter__().__next__()                 #   gets a single batch
-        
-        loss_val, y_pred, X_val, y_val = evaluate(X_val, y_val, clf, params)
-        
-        print("Epoch: " + str(epoch) + "     " + str(dt.datetime.now()))
-        print("Training Loss: " + str(loss.item()) + "    Val Loss: " + str(loss_val.item()))
+        #   Average training loss
+        train_loss = float(sum_train_loss) / sum_train_iters
 
-def evaluate(X_test, y_test, clf, onehot_encoder, params):
+        #   Validation Loss
+        val_loss, y_pred, X_val, y_val = evaluate(dl_val, clf, onehot_encoder, params)
+        
+        print("Training Loss: " + str(train_loss) + "    Val Loss: " + str(val_loss))
+        
+        #   print fixed validation case
+        y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
+        y_pred = int2phoneme(int_to_pho_dict, y_pred)
+        print(y_pred)
+
+def evaluate(dataloader, clf, onehot_encoder, params):
     
     scalar = params['scalar']
     output_dim = params['output_dim']
     
-    X_test_batch, X_test_seq_lens, seq_lens_idx = pad_lists(X_test)
-    X_test_batch = torch.tensor(X_test_batch)
+    sum_loss = 0
+    num_iters = 0
+    
+    for X_test, y_test in dataloader:
+    
+        X_test_batch, X_test_seq_lens, seq_lens_idx = pad_lists(X_test)
+        X_test_batch = torch.tensor(X_test_batch)
+        
+        if scalar is True:
+            #   sort y_train_batch
+            y_test_batch = torch.tensor([[y_test[idx]] for idx in seq_lens_idx]).float().cuda()
+        else:
+            #   convert list[list[int]] to padded 3d tensor (seq_len, batch_size, output_dim)
+            y_test_batch, y_test_seq_lens, seq_lens_idx = pad_lists(y_test, 
+                                                                    seq_lens_idx=seq_lens_idx)        
+            y_test_batch = lists2onehottensors(y_test_batch, output_dim, onehot_encoder,
+                                               pad_token=0)
+            
+        y_pred = clf.forward(X_test_batch, X_test_seq_lens)
+        loss = clf.compute_loss(y_pred, y_test_batch, X_test_seq_lens)
+        sum_loss += loss.item()
+        num_iters += 1
+        
+        if scalar is False:
+            #   convert softmax y_pred and y to 1d list
+            y_test_batch = onehottensors2classlist(y_test_batch, X_test_seq_lens)
+            y_pred = onehottensors2classlist(y_pred, X_test_seq_lens)
+    
+    loss = sum_loss / num_iters
+    
+    return loss, y_pred, X_test_batch, y_test_batch
+
+def predict(X, y, clf, onehot_encoder, params):
+    """
+    Runs a forward pass for a SINGLE sample and returns the output prediction.
+    Arguments:
+        X (list[int]) : a list of integers with each integer an input class of step
+        y (list[int]) : a list of integers with each integer an output class of step
+    Returns:
+        y_pred (list[int]) : a list of integers with each integer the prediction of each step
+    """
+    scalar = params['scalar']
+    output_dim = params['output_dim']
+    
+    X = torch.tensor(X).cuda()         #   shape(seq_len,)
+    X = X.unsqueeze(0)          #   shape(batch_size=1, seq_len)
+    
+    seq_len = [len(y)]              #   2d list
     
     if scalar is True:
-        #   sort y_train_batch
-        y_test_batch = torch.tensor([[y_test[idx]] for idx in seq_lens_idx])
+        y = torch.tensor(y).cuda()         #   shape(1,)
+        y = y.unsqueeze(0)                  #   shape(1,1)
     else:
-        #   convert list[list[int]] to padded 3d tensor (seq_len, batch_size, output_dim)
-        y_test_batch, y_test_seq_lens, seq_lens_idx = pad_lists(y_test, 
-                                                                seq_lens_idx=seq_lens_idx)        
-        y_test_batch = lists2onehottensors(y_test_batch, output_dim, onehot_encoder,
-                                           pad_token=0)
-        
-    y_pred = clf.forward(X_test_batch, X_test_seq_lens)
-    loss = clf.compute_loss(y_pred, y_test_batch, X_test_seq_lens)
+        y = lists2onehottensors([y], output_dim, onehot_encoder, pad_token=0)
+        #   change to 1-hot
+
+    y_pred = clf.forward(X, seq_len)
+    loss = clf.compute_loss(y_pred, y, seq_len)
+    loss = loss.item()
     
     if scalar is False:
-        #   convert softmax y_pred and y to 1d list
-        y_test_batch = onehottensors2classlist(y_test_batch, X_test_seq_lens)
-        y_pred = onehottensors2classlist(y_pred, X_test_seq_lens)
-        
-    return loss, y_pred, X_test_batch, y_test_batch
+            #   convert softmax y_pred and y to 1d list
+            y_pred = onehottensors2classlist(y_pred, seq_len)[0]
+    
+    return y_pred
+
+    
 
 def create_sample_data(params, min_seq_len=3, max_seq_len=10, scalar=True, shuffle=False):
     """
@@ -470,7 +563,7 @@ def main(params, verbose=False):
         params['output_dim'] = 1
     
     #   Create model
-    clf = lstm_rnn(params)
+    clf = lstm_rnn(params).cuda()
     
     #   Create one-hot encoder
     onehot_encoder = OneHotEncoder(output_dim, sparse=False)
@@ -479,27 +572,35 @@ def main(params, verbose=False):
     train(clf, onehot_encoder, params)
     
     #   Evaluate model - outputs X_test,  y_test because ordered inside of evaluate
-    dl_test = DataLoader(DATA_DIR, phoneme2int(PHONEME_OUT), params['align'],
+    dl_test = DataLoader(DATA_DIR, PHONEME_OUT, params['align'],
                     params['data_type'], 'test', batch_size = params['batch_size'])
     
-    #   Validation Loss
-    X_test, y_test = dl_test.__iter__().__next__()                 #   gets a single batch 
-    loss, y_pred, X_test, y_test = evaluate(X_test, y_test, clf, onehot_encoder, params)
+    #   Test Loss
+    loss, y_pred, X_test, y_test = evaluate(dl_test, clf, onehot_encoder, params)
         
-    if scalar is True:
-        for sample in range(0, len(y_test)):
-            print("Label: ", float(y_test[sample]), "    Predict: ", float(y_pred[sample]))
-        print("Loss: ", str(loss.item()))
-    else:
-        for sample in range(0, len(y_test)):
-            print("Label: ", y_test[sample])
-            print("Predict: ", y_pred[sample])
-        print("Loss: ", str(loss.item()))
+    #if scalar is True:
+    #    for sample in range(0, len(y_test)):
+    #        print("Label: ", float(y_test[sample]), "    Predict: ", float(y_pred[sample]))
+    #    print("Loss: ", str(loss.item()))
+    #else:
+    #    for sample in range(0, len(y_test)):
+    #        print("Label: ", y_test[sample])
+    #        print("Predict: ", y_pred[sample])
+    #    print("Loss: ", str(loss.item()))
     
 if __name__ == '__main__':
     
     #torch.manual_seed = 1
-    vocab_size = len(phoneme2int(PHONEME_OUT))+1
+    alignment = 'hypothesis'
+    data_type = 'full'
+    
+    dl = DataLoader(DATA_DIR, PHONEME_OUT, alignment,
+                    data_type, 'val', batch_size = 4)
+    
+    X, y = dl.__iter__().__next__()
+    print(y)
+    
+    vocab_size = dl.vocab_size
     
     params = {
             'input_dim':        vocab_size,
@@ -508,13 +609,13 @@ if __name__ == '__main__':
             'output_dim':       vocab_size,              
             'num_layers':       1,
             'batch_size':       256,
-            'num_epochs':       20,
+            'num_epochs':       200,
             'learning_rate':    0.05,
             'learning_decay':   0.9,
-            'bidirectional':    True,
+            'bidirectional':    False,
             'scalar':           False,
-            'align':            'hypothesis',
-            'data_type':        'full'
+            'align':            alignment,
+            'data_type':        data_type
     }
 
     main(params, verbose=True)
