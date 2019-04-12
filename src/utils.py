@@ -12,3 +12,14 @@ def discrete_value_error_message(param_name, values):
     values = [("'{}'".format(i) if type(i) == str else str(i)) for i in values]
     value_string = ', '.join(values[:-1]) + ', or ' + values[-1]
     return "`{}' must be one of: {}".format(param_name, value_string)
+
+
+def int2phoneme(int_to_phoneme, int_list):
+    """
+    Converts a list of integers into a list of phonemes according to the given
+    int-to-phoneme dictionary.
+    :param int_to_phoneme: a dictionary mapping integers to phonemes
+    :param int_list: a list of integers to map
+    :return: a list of phonemes
+    """
+    return [int_to_phoneme[i] for i in int_list]

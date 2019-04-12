@@ -1,27 +1,13 @@
 from src.utils import discrete_value_error_message as error_msg
 from src.align_phonemes import ALIGNMENT_OPTS, OUTPUT_OPTS
 from src.align_phonemes import DEL, INS_SAME, INS_DIFF
+from src.align_phonemes import NONE_CODES, HYP_CODES
 from sklearn.model_selection import train_test_split
 from src.phonemes import PHONEME_OUT, DATA_DIR
 
 
-def phoneme2int(file):
-    """
-    Returns a dictionary mapping each phoneme, including the meta-phonemes, to
-    a unique integer, which can then be used for one-hot encoding.
-
-    :param file: the file containing the phoneme dictionary
-    :return: a dictionary mapping each phoneme to a unique integer
-    """
-    with open(file, 'r') as f:
-        lines = [line.strip().split('\t')[1] for line in f]
-        lines.append('{} {} {}'.format(DEL, INS_SAME, INS_DIFF))
-        phonemes = sorted(set([p for line in lines for p in line.split()]))
-    return {p: i + 1 for i, p in enumerate(phonemes)}
-
-
 class DataLoader:
-    def __init__(self, data_dir, phoneme_to_int, alignment, output, dataset,
+    def __init__(self, data_dir, phoneme_file, alignment, output, dataset,
                  batch_size):
         """
         Loads an aligned dataset from the given directory, converting phonemes
@@ -43,27 +29,57 @@ class DataLoader:
         distributions.
 
         :param data_dir: the directory from which to load the files
-        :param phoneme_to_int: a dictionary mapping phonemes to unique integers
+        :param phoneme_file: the file containing the phoneme dictionary
         :param alignment: one of ['none', 'hypothesis']
         :param output: one of ['full', 'abridged', 'binary', 'scalar']
         :param dataset: one of ['train', 'val', 'test']
         :param batch_size: the mini-batch size
         """
+        # Valdiate parameters.
         if alignment not in ALIGNMENT_OPTS:
             raise ValueError(error_msg('alignment', ALIGNMENT_OPTS))
         if output not in OUTPUT_OPTS:
             raise ValueError(error_msg('output', OUTPUT_OPTS))
         if dataset not in ['train', 'val', 'test']:
             raise ValueError(error_msg('dataset', ['train', 'val', 'test']))
+        # Load phoneme2int dictionary.
+        with open(phoneme_file, 'r') as f:
+            lines = [line.strip().split('\t')[1] for line in f]
+            if alignment == 'hypothesis':
+                lines.append('{} {} {}'.format(DEL, INS_SAME, INS_DIFF))
+            phonemes = sorted(set([p for line in lines for p in line.split()]))
+        phoneme_to_int = {p: i + 1 for i, p in enumerate(phonemes)}
+        # Create the int2phoneme dictionary.
+        if output == 'binary':
+            self.int_to_phoneme = {1: 'match', 2: 'not_match'}
+        elif output == 'abridged':
+            if alignment == 'none':
+                self.int_to_phoneme = {v: k for k, v in NONE_CODES}
+            else:
+                self.int_to_phoneme = {v: k for k, v in HYP_CODES}
+        elif output == 'scalar':
+            self.int_to_phoneme = None
+        else:
+            self.int_to_phoneme = {v: k for k, v in phoneme_to_int}
+        # Load dataset.
         with open(data_dir + alignment + "_" + output + ".txt", 'r') as f:
             lines = [line.strip().split('\t') for line in f]
         ref = [[phoneme_to_int[p] for p in l[0].split()] for l in lines]
         if output == 'full':
             hyp = [[phoneme_to_int[p] for p in l[1].split()] for l in lines]
+            self.vocab_size = len(phoneme_to_int) + 1
         elif output == 'binary' or output == 'abridged':
             hyp = [[int(b) for b in l[1].split()] for l in lines]
+            if output == 'binary':
+                self.vocab_size = 3
+            elif alignment == 'none':
+                self.vocab_size = len(NONE_CODES) + 1
+            else:
+                self.vocab_size = len(HYP_CODES) + 1
         else:  # output == 'scalar'
             hyp = [int(s[1]) for s in lines]
+            self.vocab_size = 1
+        # Prune dataset.
         ref_train, ref_test, hyp_train, hyp_test = train_test_split(
             ref, hyp, test_size=0.25, random_state=0)
         ref_val, ref_test, hyp_val, hyp_test = train_test_split(
@@ -74,6 +90,7 @@ class DataLoader:
             self.ref, self.hyp = ref_val, hyp_val
         else:  # dataset == 'test'
             self.ref, self.hyp = ref_test, hyp_test
+        # Prepare for iterations.
         self.i, self.random_state, self.size = 0, 0, len(self.ref)
         self.batch_size = batch_size
 
@@ -93,8 +110,7 @@ if __name__ == '__main__':
     for align in ALIGNMENT_OPTS:
         for out in OUTPUT_OPTS:
             for data in ['train', 'val', 'test']:
-                dl = DataLoader(DATA_DIR, phoneme2int(PHONEME_OUT), align, out,
-                                data, 256)
+                dl = DataLoader(DATA_DIR, PHONEME_OUT, align, out, data, 256)
                 data_check = {0: {'X': [], 'y': []}, 1: {'X': [], 'y': []}}
                 for epoch in range(2):
                     for X, y in dl:
