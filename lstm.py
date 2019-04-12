@@ -14,18 +14,30 @@ Revisions:
                             Modified existing functions for both params['scalar'] = True and False
                             Fixed bug in bidirectional scalar - now concatenates leftmost reverse hidden state 
                                 and rightmost forward hidden state
+    2019-04-11      (AY)    Add in DataLoader
+                            Change list2onehottensors() / onehottensors2classlist() to have faster method using sklearn
 
 Helpful Links:
     PyTorch LSTM outputs : https://stackoverflow.com/questions/48302810/whats-the-difference-between-hidden-and-output-in-pytorch-lstm
     Example of PackedSequence : https://towardsdatascience.com/taming-lstms-variable-sized-mini-batches-and-why-pytorch-is-good-for-your-health-61d35642972e
     Bidirectional LSTM Output : https://towardsdatascience.com/understanding-bidirectional-rnn-in-pytorch-5bd25a5dd66
     Bidirectional LSTM Output h_n : https://discuss.pytorch.org/t/how-can-i-know-which-part-of-h-n-of-bidirectional-rnn-is-for-backward-process/3883
+    One Hot Encoding (Sklearn) : https://machinelearningmastery.com/how-to-one-hot-encode-sequence-data-in-python/
+    
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import random
+import src.phonemes
+from src.data_loader import DataLoader, phoneme2int
+from sklearn.preprocessing import OneHotEncoder
+import datetime as dt
+
+
+DATA_DIR = "./data/transcripts/"
+PHONEME_OUT = "./data/phonemes.txt"
 
 class lstm_rnn(nn.Module):
     
@@ -213,33 +225,30 @@ class lstm_rnn(nn.Module):
         
         return tensors, seq_lens
 
-def lists2onehottensors(lists, dim, pad_token=-1):
+def lists2onehottensors(lists, dim, onehot_encoder, pad_token=0):
     """
     Converts padded list of lists of integers to 3d tensor (max(seq_len), batch_size, dim)
     Arguments:
         lists (list[list[int]]) : list of integers lists with all internal lists of equal length
+        onehot_encoder (class OneHotEncoder) : encoder for 1-hot encoding using OneHotEncoder
         dim (int) : number of output dimensions for 1 hot tensor
-        pad_token (int) : integer value which indicates an empty 1-hot vector (default -1 = no pad_token)
+        pad_token (int) : integer value which indicates an empty 1-hot vector (default 0)
     Returns:
         tensor (torch.tensor) : padded 3d tensor of shape (max(seq_len),, batch_size, dim)
-    """
-    
+    """        
     tensor_list = []
     
     for sample_idx in range(0, len(lists)):       #   for every sample in the batch
         sample = lists[sample_idx]
-        seq_len = len(sample)
-        tensor = torch.zeros((dim, seq_len))     #   dim = # rows, seq_len = # cols
-        for idx in range(0, seq_len):
-            if pad_token != sample[idx]:
-                tensor[sample[idx], idx] = 1
-        tensor_list.append(tensor)
-
-    tensors = torch.stack(tensor_list)          #   shape(batch_size, dim, seq_len)
-
-    #   reshape to (seq_len, batch_size, dim)
-    tensors = tensors.transpose(dim0=0, dim1=2).transpose(dim0=1, dim1=2)
+        sample = np.array(sample)       #   convert to np.array
+        sample = sample.reshape(len(sample), 1)
+        encoded_sample = torch.tensor(onehot_encoder.fit_transform(sample)).float()
+        tensor_list.append(encoded_sample)   #  shape(seq_len, dim)
     
+    tensors = torch.stack(tensor_list)          #   shape(batch_size, seq_len, dim)
+    #   reshape to (seq_len, batch_size, dim)
+    tensors = tensors.transpose(dim0=0, dim1=1)
+        
     return tensors    
 
 def onehottensors2classlist(onehottensor, seq_lens):
@@ -261,10 +270,9 @@ def onehottensors2classlist(onehottensor, seq_lens):
     for idx in range(0, onehottensor.shape[1]):     # for every tensor sample in batch
         integer_list = []
         tensor2d = onehottensor[:, idx, :]          # shape (seq_len, dim)
-        for step in range(0, seq_lens[idx]):
-            #   get max index of tensor2d allowing dim0
-            max_class = tensor2d[step, :].max(dim=0)
-            integer_list.append(int(max_class[1]))
+        max_classes = tensor2d.max(dim=1)
+        integer_list = max_classes[1].tolist()
+        
         batch_list.append(integer_list)
     
     return batch_list
@@ -300,69 +308,83 @@ def pad_lists(lists, pad_token=0, seq_lens_idx=[]):
     return ordered_lists, ordered_seq_lens, seq_lens_idx
 
 
-def train(X_train, y_train, clf, params):
+def train(clf, onehot_encoder, params):
     """
     Trains the model given training data.
     Arguments:
-        X_train (torch.tensor) : padded tensor containing integers (1d, instead of hidden_dim) 
-            of shape (seq_len x num_sample)
-        y_train (torch.tensor()) : expected output labels corresponding to X
         clf (class) : lstm model
         params (dict) : contains model, dimension, and batch parameters
     Returns:
         None
     """
-    
     num_epochs = params['num_epochs']
     lr = params['learning_rate']
     scalar = params['scalar']
     output_dim = params['output_dim']
-    #   Create optimizer
     
+    #   Create training data DataLoader
+    dl_train = DataLoader(DATA_DIR, phoneme2int(PHONEME_OUT), params['align'],
+                    params['data_type'], 'train', batch_size = params['batch_size'])
+    dl_val = DataLoader(DATA_DIR, phoneme2int(PHONEME_OUT), params['align'],
+                    params['data_type'], 'val', batch_size = params['batch_size'])
+    
+    #   Create optimizer
     optimizer = torch.optim.Adam(list(clf.parameters()), lr=lr)
 
     for epoch in range(0, num_epochs):
-        
-        #   get batch and order
-        X_train, y_train = create_sample_data(params, scalar = scalar, shuffle=True)
-        
-        X_train_batch, X_train_seq_lens, seq_lens_idx = pad_lists(X_train)
-        X_train_batch = torch.tensor(X_train_batch)   
+        batch_idx = 0        
+        for X_train, y_train in dl_train:
+            print("Batch Idx: ", batch_idx, "     ", dt.datetime.now())
+            X_train_batch, X_train_seq_lens, seq_lens_idx = pad_lists(X_train)
+            X_train_batch = torch.tensor(X_train_batch)   
+                    
+            if scalar is True:
+                #   sort y_train_batch
+                y_train_batch = torch.tensor([[y_train[idx]] for idx in seq_lens_idx]).float()
+            else:
+                #   convert list[list[int]] to padded 3d tensor (seq_len, batch_size, output_dim)                
+                y_train_batch, y_train_seq_lens, seq_lens_idx = pad_lists(y_train, 
+                                                                          seq_lens_idx=seq_lens_idx)
+                y_train_batch = lists2onehottensors(y_train_batch, output_dim, onehot_encoder,
+                                                    pad_token=0)
                 
-        if scalar is True:
-            #   sort y_train_batch
-            y_train_batch = torch.tensor([[y_train[idx]] for idx in seq_lens_idx])
-        else:
-            #   convert list[list[int]] to padded 3d tensor (seq_len, batch_size, output_dim)
-            y_train_batch, y_train_seq_lens, seq_lens_idx = pad_lists(y_train, seq_lens_idx)
-            y_train_batch = lists2onehottensors(y_train_batch, dim=output_dim, pad_token=0)
+            #   Zero the gradient of the optimizer
+            optimizer.zero_grad()
             
-        #   Zero the gradient of the optimizer
-        optimizer.zero_grad()
+            #   Forward pass
+            y_pred = clf.forward(X_train_batch, X_train_seq_lens)
+            loss = clf.compute_loss(y_pred, y_train_batch, X_train_seq_lens)
         
-        #   Forward pass
-        y_pred = clf.forward(X_train_batch, X_train_seq_lens)
-        loss = clf.compute_loss(y_pred, y_train_batch, X_train_seq_lens)
-        
-        print("Epoch: " + str(epoch) + "    Loss: " + str(loss.item()))
-    
-        loss.backward()     #   backward pass
-        optimizer.step()    #   update gradient step
+            loss.backward()     #   backward pass
+            optimizer.step()    #   update gradient step
+            
+            batch_idx += 1
 
-def evaluate(X_test, y_test, clf, params):
+        #   Validation Loss
+        X_val, y_val = dl_val.__iter__().__next__()                 #   gets a single batch
+        
+        loss_val, y_pred, X_val, y_val = evaluate(X_val, y_val, clf, params)
+        
+        print("Epoch: " + str(epoch) + "     " + str(dt.datetime.now()))
+        print("Training Loss: " + str(loss.item()) + "    Val Loss: " + str(loss_val.item()))
+
+def evaluate(X_test, y_test, clf, onehot_encoder, params):
     
     scalar = params['scalar']
     output_dim = params['output_dim']
     
     X_test_batch, X_test_seq_lens, seq_lens_idx = pad_lists(X_test)
     X_test_batch = torch.tensor(X_test_batch)
+    
     if scalar is True:
         #   sort y_train_batch
         y_test_batch = torch.tensor([[y_test[idx]] for idx in seq_lens_idx])
     else:
         #   convert list[list[int]] to padded 3d tensor (seq_len, batch_size, output_dim)
-        y_test_batch, y_test_seq_lens, seq_lens_idx = pad_lists(y_test, seq_lens_idx)
-        y_test_batch = lists2onehottensors(y_test_batch, dim=output_dim, pad_token=0)
+        y_test_batch, y_test_seq_lens, seq_lens_idx = pad_lists(y_test, 
+                                                                seq_lens_idx=seq_lens_idx)        
+        y_test_batch = lists2onehottensors(y_test_batch, output_dim, onehot_encoder,
+                                           pad_token=0)
         
     y_pred = clf.forward(X_test_batch, X_test_seq_lens)
     loss = clf.compute_loss(y_pred, y_test_batch, X_test_seq_lens)
@@ -416,7 +438,6 @@ def create_sample_data(params, min_seq_len=3, max_seq_len=10, scalar=True, shuff
                 sequence = list(range(0, seq_len[i]))      #   ascending consecutive integers
             else:
                 sequence = list(range(seq_len[i], 0, -1))  #   descending consecutive integers
-            
             #   make sure all values in sequence is less than output_dim
             sequence = [value if value < output_dim else output_dim-1 for value in sequence]
 
@@ -433,9 +454,10 @@ def create_sample_data(params, min_seq_len=3, max_seq_len=10, scalar=True, shuff
 
     return X, y
 
-def main_fcn(params, verbose=False):
+def main(params, verbose=False):
     
     scalar = params['scalar']
+    output_dim = params['output_dim']
     
     #   initialize classifier
     if verbose:
@@ -450,14 +472,19 @@ def main_fcn(params, verbose=False):
     #   Create model
     clf = lstm_rnn(params)
     
-    #   Train model
-    X_train, y_train = create_sample_data(params, scalar=scalar, shuffle=True)
-    X_test, y_test = create_sample_data(params, scalar=scalar, shuffle=True)
+    #   Create one-hot encoder
+    onehot_encoder = OneHotEncoder(output_dim, sparse=False)
     
-    train(X_train, y_train, clf, params)
+    #   Train model    
+    train(clf, onehot_encoder, params)
     
     #   Evaluate model - outputs X_test,  y_test because ordered inside of evaluate
-    loss, y_pred, X_test, y_test = evaluate(X_test, y_test, clf, params)
+    dl_test = DataLoader(DATA_DIR, phoneme2int(PHONEME_OUT), params['align'],
+                    params['data_type'], 'test', batch_size = params['batch_size'])
+    
+    #   Validation Loss
+    X_test, y_test = dl_test.__iter__().__next__()                 #   gets a single batch 
+    loss, y_pred, X_test, y_test = evaluate(X_test, y_test, clf, onehot_encoder, params)
         
     if scalar is True:
         for sample in range(0, len(y_test)):
@@ -472,7 +499,7 @@ def main_fcn(params, verbose=False):
 if __name__ == '__main__':
     
     #torch.manual_seed = 1
-    vocab_size = 20
+    vocab_size = len(phoneme2int(PHONEME_OUT))+1
     
     params = {
             'input_dim':        vocab_size,
@@ -480,12 +507,14 @@ if __name__ == '__main__':
             'hidden_dim':       25,            
             'output_dim':       vocab_size,              
             'num_layers':       1,
-            'batch_size':       15,
-            'num_epochs':       300,
+            'batch_size':       256,
+            'num_epochs':       20,
             'learning_rate':    0.05,
             'learning_decay':   0.9,
             'bidirectional':    True,
-            'scalar':           False
+            'scalar':           False,
+            'align':            'hypothesis',
+            'data_type':        'full'
     }
-    
-    main_fcn(params, verbose=True)
+
+    main(params, verbose=True)
