@@ -54,13 +54,13 @@ class DataLoader:
             self.int_to_phoneme = {1: 'match', 2: 'not_match'}
         elif output == 'abridged':
             if alignment == 'none':
-                self.int_to_phoneme = {v: k for k, v in NONE_CODES}
+                self.int_to_phoneme = {v: k for k, v in NONE_CODES.items()}
             else:
-                self.int_to_phoneme = {v: k for k, v in HYP_CODES}
+                self.int_to_phoneme = {v: k for k, v in HYP_CODES.items()}
         elif output == 'scalar':
             self.int_to_phoneme = None
         else:
-            self.int_to_phoneme = {v: k for k, v in phoneme_to_int}
+            self.int_to_phoneme = {v: k for k, v in phoneme_to_int.items()}
         # Load dataset.
         with open(data_dir + alignment + "_" + output + ".txt", 'r') as f:
             lines = [line.strip().split('\t') for line in f]

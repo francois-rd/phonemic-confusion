@@ -17,9 +17,13 @@ def discrete_value_error_message(param_name, values):
 def int2phoneme(int_to_phoneme, int_list):
     """
     Converts a list of integers into a list of phonemes according to the given
-    int-to-phoneme dictionary.
+    int-to-phoneme dictionary. If int_to_phoneme is None, then return int_list
+    as is.
+
     :param int_to_phoneme: a dictionary mapping integers to phonemes
     :param int_list: a list of integers to map
     :return: a list of phonemes
     """
+    if int_to_phoneme is None:
+        return int_list
     return [int_to_phoneme[i] for i in int_list]
