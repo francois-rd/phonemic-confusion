@@ -18,7 +18,7 @@ Revisions:
                             Change list2onehottensors() / onehottensors2classlist() to have faster method using sklearn
     2019-04-12      (AY)    Removed warnings
                             Modified for new Dataloader
-                            Made GPU compatible (cuda.()) for 'full' - doesn't work for 'binary' or 'abridged'
+                            Made GPU compatible (cuda.()) for 'full'
                             
 
 Helpful Links:
@@ -218,8 +218,7 @@ class lstm_rnn(nn.Module):
         tensor_list = []
         for idx in range(tensors.shape[0]):                    #   for every sample in batch
             tensor_list.append(tensors[idx, :, :])
-        
-        
+
         packedseq = nn.utils.rnn.pad_sequence(tensor_list)  #   tensor (seq_len, batch_size, input_dim)
         packedseq = nn.utils.rnn.pack_padded_sequence(packedseq, seq_lens)
     
@@ -338,6 +337,10 @@ def train(clf, onehot_encoder, params):
     output_dim = params['output_dim']
     
     #   Create training data DataLoader
+    dl_full = DataLoader(DATA_DIR, PHONEME_OUT, params['align'], 'full', 'val',
+                            batch_size = params['batch_size'])
+    full_dict = dl_full.int_to_phoneme
+    
     dl_train = DataLoader(DATA_DIR, PHONEME_OUT, params['align'],
                     params['data_type'], 'train', batch_size = params['batch_size'])
     dl_val = DataLoader(DATA_DIR, PHONEME_OUT, params['align'],
@@ -351,15 +354,14 @@ def train(clf, onehot_encoder, params):
     #   consistent validation case
 
     X_fixed_batch, y_fixed_batch = dl_val.__iter__().__next__()                 #   gets a single batch
-    X_fixed = X_fixed_batch[2]
-    y_fixed = y_fixed_batch[2]
+    X_fixed = X_fixed_batch[0]
+    y_fixed = y_fixed_batch[0]
     
-    print(len(X_fixed))
-    print(len(y_fixed))
+    print("y_fixed_batch", y_fixed_batch)
     
     y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
 
-    X_fixed_phoneme = int2phoneme(int_to_pho_dict, X_fixed)
+    X_fixed_phoneme = int2phoneme(full_dict, X_fixed)
     y_fixed_phoneme = int2phoneme(int_to_pho_dict, y_fixed)
     y_pred = int2phoneme(int_to_pho_dict, y_pred)
     print("X_fixed: ", X_fixed_phoneme)
@@ -468,16 +470,19 @@ def predict(X, y, clf, onehot_encoder, params):
     X = torch.tensor(X).cuda()         #   shape(seq_len,)
     X = X.unsqueeze(0)          #   shape(batch_size=1, seq_len)
     
-    seq_len = [len(y)]              #   2d list
+    if scalar is True:
+        seq_len = [1]
+    else:
+        seq_len = [len(y)]              #   2d list
     
     if scalar is True:
-        y = torch.tensor(y).cuda()         #   shape(1,)
-        y = y.unsqueeze(0)                  #   shape(1,1)
+        y = torch.tensor([[y]]).cuda().float().cuda()         #   shape(1,)
     else:
         y = lists2onehottensors([y], output_dim, onehot_encoder, pad_token=0)
         #   change to 1-hot
 
     y_pred = clf.forward(X, seq_len)
+    
     loss = clf.compute_loss(y_pred, y, seq_len)
     loss = loss.item()
     
@@ -572,6 +577,7 @@ def main(params, verbose=False):
     train(clf, onehot_encoder, params)
     
     #   Evaluate model - outputs X_test,  y_test because ordered inside of evaluate
+    
     dl_test = DataLoader(DATA_DIR, PHONEME_OUT, params['align'],
                     params['data_type'], 'test', batch_size = params['batch_size'])
     
@@ -592,28 +598,30 @@ if __name__ == '__main__':
     
     #torch.manual_seed = 1
     alignment = 'hypothesis'
-    data_type = 'full'
+    data_type = 'scalar'
+
     
-    dl = DataLoader(DATA_DIR, PHONEME_OUT, alignment,
+    #   get input dim (always 44)
+    dl_1 = DataLoader(DATA_DIR, PHONEME_OUT, alignment, 'full', 'val', batch_size=4)
+    input_dim = dl_1.vocab_size
+    
+    #   get output dim (e.g. binary = 3, full = 44)
+    dl_2 = DataLoader(DATA_DIR, PHONEME_OUT, alignment,
                     data_type, 'val', batch_size = 4)
-    
-    X, y = dl.__iter__().__next__()
-    print(y)
-    
-    vocab_size = dl.vocab_size
+    output_dim = dl_2.vocab_size
     
     params = {
-            'input_dim':        vocab_size,
-            'embed_dim':        vocab_size,
+            'input_dim':        input_dim,
+            'embed_dim':        input_dim,
             'hidden_dim':       25,            
-            'output_dim':       vocab_size,              
+            'output_dim':       output_dim,              
             'num_layers':       1,
             'batch_size':       256,
             'num_epochs':       200,
             'learning_rate':    0.05,
             'learning_decay':   0.9,
             'bidirectional':    False,
-            'scalar':           False,
+            'scalar':           True,
             'align':            alignment,
             'data_type':        data_type
     }
