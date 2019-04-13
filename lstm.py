@@ -19,6 +19,7 @@ Revisions:
     2019-04-12      (AY)    Removed warnings
                             Modified for new Dataloader
                             Made GPU compatible (cuda.()) for 'full'
+                            Add basic training model saving feature
                             
 
 Helpful Links:
@@ -27,6 +28,7 @@ Helpful Links:
     Bidirectional LSTM Output : https://towardsdatascience.com/understanding-bidirectional-rnn-in-pytorch-5bd25a5dd66
     Bidirectional LSTM Output h_n : https://discuss.pytorch.org/t/how-can-i-know-which-part-of-h-n-of-bidirectional-rnn-is-for-backward-process/3883
     One Hot Encoding (Sklearn) : https://machinelearningmastery.com/how-to-one-hot-encode-sequence-data-in-python/
+    Saving PyTorch models : https://medium.com/udacity-pytorch-challengers/saving-loading-your-model-in-pytorch-741b80daf3c
     
 """
 import os, sys
@@ -50,6 +52,7 @@ if not sys.warnoptions:
 
 DATA_DIR = "./data/transcripts/"
 PHONEME_OUT = "./data/phonemes.txt"
+SAVE_DIR = "./output/NN/LSTM/"
 
 class lstm_rnn(nn.Module):
     
@@ -329,12 +332,13 @@ def train(clf, onehot_encoder, params):
         clf (class) : lstm model
         params (dict) : contains model, dimension, and batch parameters
     Returns:
-        None
+        clf (class) : the trained model
     """
     num_epochs = params['num_epochs']
     lr = params['learning_rate']
     scalar = params['scalar']
     output_dim = params['output_dim']
+    filename = params['save_name']
     
     #   Create training data DataLoader
     dl_full = DataLoader(DATA_DIR, PHONEME_OUT, params['align'], 'full', 'val',
@@ -356,8 +360,6 @@ def train(clf, onehot_encoder, params):
     X_fixed_batch, y_fixed_batch = dl_val.__iter__().__next__()                 #   gets a single batch
     X_fixed = X_fixed_batch[0]
     y_fixed = y_fixed_batch[0]
-    
-    print("y_fixed_batch", y_fixed_batch)
     
     y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
 
@@ -417,6 +419,16 @@ def train(clf, onehot_encoder, params):
         y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
         y_pred = int2phoneme(int_to_pho_dict, y_pred)
         print(y_pred)
+
+        #   save progress
+        if epoch % 2 == 0:
+            checkpoint = {'model': lstm_rnn(params),
+                          'state_dict': clf.state_dict(),
+                          'optimizer': optimizer.state_dict()}
+            file =  SAVE_DIR + filename + "_" + str(epoch) + ".pth"
+            torch.save(checkpoint, file)
+    
+    return clf
 
 def evaluate(dataloader, clf, onehot_encoder, params):
     
@@ -552,7 +564,24 @@ def create_sample_data(params, min_seq_len=3, max_seq_len=10, scalar=True, shuff
 
     return X, y
 
-def main(params, verbose=False):
+def load_checkpoint(filename):
+    """
+    Loads a saved model
+    Arugments:
+        filename (str) : name of file in SAVE_DIR
+    Returns
+        model : saved model in filename
+    """
+    checkpoint = torch.load(SAVE_DIR + filename)
+    model = checkpoint['model']
+    model.load_state_dict(checkpoint['state_dict'])
+    #for parameter in model.parameters():
+    #    parameter.requires_grad = False
+    #model.eval()
+    return model
+    
+
+def main(params, load_model=False, train_model=True, verbose=False):
     
     scalar = params['scalar']
     output_dim = params['output_dim']
@@ -568,13 +597,19 @@ def main(params, verbose=False):
         params['output_dim'] = 1
     
     #   Create model
-    clf = lstm_rnn(params).cuda()
+    if load_model is True:
+        print("Loading model...")
+        clf = load_checkpoint(params['load_name']).cuda()
+    else:
+        print("Initializing model...")
+        clf = lstm_rnn(params).cuda()
     
     #   Create one-hot encoder
     onehot_encoder = OneHotEncoder(output_dim, sparse=False)
     
     #   Train model    
-    train(clf, onehot_encoder, params)
+    if train_model is True:
+        clf = train(clf, onehot_encoder, params)
     
     #   Evaluate model - outputs X_test,  y_test because ordered inside of evaluate
     
@@ -584,15 +619,15 @@ def main(params, verbose=False):
     #   Test Loss
     loss, y_pred, X_test, y_test = evaluate(dl_test, clf, onehot_encoder, params)
         
-    #if scalar is True:
-    #    for sample in range(0, len(y_test)):
-    #        print("Label: ", float(y_test[sample]), "    Predict: ", float(y_pred[sample]))
-    #    print("Loss: ", str(loss.item()))
-    #else:
-    #    for sample in range(0, len(y_test)):
-    #        print("Label: ", y_test[sample])
-    #        print("Predict: ", y_pred[sample])
-    #    print("Loss: ", str(loss.item()))
+    if scalar is True:
+        for sample in range(0, len(y_test)):
+            print("Label: ", float(y_test[sample]), "    Predict: ", float(y_pred[sample]))
+        print("Loss: ", str(loss))
+    else:
+        for sample in range(0, len(y_test)):
+            print("Label: ", y_test[sample])
+            print("Predict: ", y_pred[sample])
+        print("Loss: ", str(loss))
     
 if __name__ == '__main__':
     
@@ -623,7 +658,9 @@ if __name__ == '__main__':
             'bidirectional':    False,
             'scalar':           True,
             'align':            alignment,
-            'data_type':        data_type
+            'data_type':        data_type,
+            'load_name':        'lstm_10.pth',
+            'save_name':        'lstm'
     }
 
-    main(params, verbose=True)
+    main(params, load_model=True, train_model=False, verbose=True)
