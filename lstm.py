@@ -20,6 +20,9 @@ Revisions:
                             Modified for new Dataloader
                             Made GPU compatible (cuda.()) for 'full'
                             Add basic training model saving feature
+    2019-04-13      (AY)    Added scaling to make 'scalar' compute the # of errors (instead of word error rate)
+                            Added epoch loss saving to report
+                            
                             
 
 Helpful Links:
@@ -160,6 +163,8 @@ class lstm_rnn(nn.Module):
             else:
                 final_hidden_state = final_hidden_states[-1]
             y_pred = torch.sigmoid(self.linear(final_hidden_state))
+            y_pred = torch.mul(y_pred, torch.tensor(seq_lens).unsqueeze(1).float().cuda())          #   scale to number of errors from error rate
+
         else:
             #   bidirectional lstm is already concatenated
             y_pred = F.softmax(self.linear(lstm_out), dim=2)
@@ -178,7 +183,7 @@ class lstm_rnn(nn.Module):
         Returns:
             loss (torch.tensor) : MSE loss of y (self.scalar=True)
         """
-        if self.scalar is True:
+        if self.scalar is True:          
             return F.mse_loss(y, target)
         else:
             if len(seq_lens) != y.shape[1] or y.shape[1] != target.shape[1]: 
@@ -340,6 +345,9 @@ def train(clf, onehot_encoder, params):
     output_dim = params['output_dim']
     filename = params['save_name']
     
+    #   name report file for writing
+    train_filename = SAVE_DIR + str(dt.datetime.now()) + "_" + params['train_report']
+    
     #   Create training data DataLoader
     dl_full = DataLoader(DATA_DIR, PHONEME_OUT, params['align'], 'full', 'val',
                             batch_size = params['batch_size'])
@@ -358,8 +366,8 @@ def train(clf, onehot_encoder, params):
     #   consistent validation case
 
     X_fixed_batch, y_fixed_batch = dl_val.__iter__().__next__()                 #   gets a single batch
-    X_fixed = X_fixed_batch[0]
-    y_fixed = y_fixed_batch[0]
+    X_fixed = X_fixed_batch[2]
+    y_fixed = y_fixed_batch[2]
     
     y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
 
@@ -376,6 +384,9 @@ def train(clf, onehot_encoder, params):
         
         sum_train_loss = 0
         sum_train_iters = 0
+        
+        #   open report file for writing
+        train_file = open(train_filename, "a+")
         
         for X_train, y_train in dl_train:
             #print("Batch Idx: ", batch_idx, "     ", dt.datetime.now())
@@ -414,6 +425,9 @@ def train(clf, onehot_encoder, params):
         val_loss, y_pred, X_val, y_val = evaluate(dl_val, clf, onehot_encoder, params)
         
         print("Training Loss: " + str(train_loss) + "    Val Loss: " + str(val_loss))
+        train_file.write("Epoch: " + str(epoch) + "    Training Loss: " + str(train_loss) + 
+                         "    Val Loss: " + str(val_loss) + "\n")
+        train_file.close()          #   close file after writing to save
         
         #   print fixed validation case
         y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
@@ -427,7 +441,7 @@ def train(clf, onehot_encoder, params):
                           'optimizer': optimizer.state_dict()}
             file =  SAVE_DIR + filename + "_" + str(epoch) + ".pth"
             torch.save(checkpoint, file)
-    
+        
     return clf
 
 def evaluate(dataloader, clf, onehot_encoder, params):
@@ -483,7 +497,7 @@ def predict(X, y, clf, onehot_encoder, params):
     X = X.unsqueeze(0)          #   shape(batch_size=1, seq_len)
     
     if scalar is True:
-        seq_len = [1]
+        seq_len = [X.shape[1]]
     else:
         seq_len = [len(y)]              #   2d list
     
@@ -494,7 +508,6 @@ def predict(X, y, clf, onehot_encoder, params):
         #   change to 1-hot
 
     y_pred = clf.forward(X, seq_len)
-    
     loss = clf.compute_loss(y_pred, y, seq_len)
     loss = loss.item()
     
@@ -618,16 +631,28 @@ def main(params, load_model=False, train_model=True, verbose=False):
     
     #   Test Loss
     loss, y_pred, X_test, y_test = evaluate(dl_test, clf, onehot_encoder, params)
-        
+    
+    #   Test Report
+    test_file = open(SAVE_DIR + str(dt.datetime.now()) + "_" 
+                          + params['test_report'], "w")
+    
     if scalar is True:
         for sample in range(0, len(y_test)):
             print("Label: ", float(y_test[sample]), "    Predict: ", float(y_pred[sample]))
+            test_file.write("Label: ", float(y_test[sample]), "    Predict: ", 
+                            float(y_pred[sample]))
         print("Loss: ", str(loss))
+        
     else:
         for sample in range(0, len(y_test)):
             print("Label: ", y_test[sample])
             print("Predict: ", y_pred[sample])
+            test_file.write("Label: ", y_test[sample])
+            test_file.write("Predict: ", y_pred[sample])
         print("Loss: ", str(loss))
+    
+    test_file.write("Loss: ", str(loss))
+    test_file.close()
     
 if __name__ == '__main__':
     
@@ -660,7 +685,9 @@ if __name__ == '__main__':
             'align':            alignment,
             'data_type':        data_type,
             'load_name':        'lstm_10.pth',
-            'save_name':        'lstm'
+            'save_name':        'lstm',
+            'train_report':     'lstm_report.txt',
+            'test_report':      'lstm_test.txt'
     }
 
-    main(params, load_model=True, train_model=False, verbose=True)
+    main(params, load_model=True, train_model=True, verbose=True)
