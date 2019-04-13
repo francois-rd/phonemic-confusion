@@ -22,6 +22,8 @@ Revisions:
                             Add basic training model saving feature
     2019-04-13      (AY)    Added scaling to make 'scalar' compute the # of errors (instead of word error rate)
                             Added epoch loss saving to report
+                            Change scalar to RELU activation
+                            Added in best model saving based on validation loss
                             
                             
 
@@ -162,8 +164,8 @@ class lstm_rnn(nn.Module):
                                                 final_hidden_states[-2]), dim=1)
             else:
                 final_hidden_state = final_hidden_states[-1]
-            y_pred = torch.sigmoid(self.linear(final_hidden_state))
-            y_pred = torch.mul(y_pred, torch.tensor(seq_lens).unsqueeze(1).float().cuda())          #   scale to number of errors from error rate
+            y_pred = F.relu(self.linear(final_hidden_state))
+            #y_pred = torch.mul(y_pred, torch.tensor(seq_lens).unsqueeze(1).float().cuda())          #   scale to number of errors from error rate
 
         else:
             #   bidirectional lstm is already concatenated
@@ -344,6 +346,7 @@ def train(clf, onehot_encoder, params):
     scalar = params['scalar']
     output_dim = params['output_dim']
     filename = params['save_name']
+    bestname = params['best_name']
     
     #   name report file for writing
     train_filename = SAVE_DIR + str(dt.datetime.now()) + "_" + params['train_report']
@@ -378,69 +381,94 @@ def train(clf, onehot_encoder, params):
     print("y_fixed: ", y_fixed_phoneme)
     print("y_pred: ", y_pred)
 
+    #   best model parameters
+    best_loss = 9999999999999           #   infinitely high
+    best_epoch = -1
+
     for epoch in range(0, num_epochs):
-        batch_idx = 0        
-        print("Epoch: " + str(epoch) + "     " + str(dt.datetime.now()))
-        
-        sum_train_loss = 0
-        sum_train_iters = 0
-        
-        #   open report file for writing
-        train_file = open(train_filename, "a+")
-        
-        for X_train, y_train in dl_train:
-            #print("Batch Idx: ", batch_idx, "     ", dt.datetime.now())
-            X_train_batch, X_train_seq_lens, seq_lens_idx = pad_lists(X_train)
-            X_train_batch = torch.tensor(X_train_batch).cuda()   
-                    
-            if scalar is True:
-                #   sort y_train_batch
-                y_train_batch = torch.tensor([[y_train[idx]] for idx in seq_lens_idx]).float().cuda()
-            else:
-                #   convert list[list[int]] to padded 3d tensor (seq_len, batch_size, output_dim)                
-                y_train_batch, y_train_seq_lens, seq_lens_idx = pad_lists(y_train, 
-                                                                          seq_lens_idx=seq_lens_idx)
-                y_train_batch = lists2onehottensors(y_train_batch, output_dim, onehot_encoder,
-                                                    pad_token=0)
+        try:
+            batch_idx = 0        
+            print("Epoch: " + str(epoch) + "     " + str(dt.datetime.now()))
             
-            #   Zero the gradient of the optimizer
-            optimizer.zero_grad()
+            sum_train_loss = 0
+            sum_train_iters = 0
             
-            #   Forward pass
-            y_pred = clf.forward(X_train_batch, X_train_seq_lens)
-            loss = clf.compute_loss(y_pred, y_train_batch, X_train_seq_lens)
-        
-            sum_train_loss += loss.item()
-            sum_train_iters += 1
-        
-            loss.backward()     #   backward pass
-            optimizer.step()    #   update gradient step
+            #   open report file for writing
+            train_file = open(train_filename, "a+")
             
-            batch_idx += 1
-
-        #   Average training loss
-        train_loss = float(sum_train_loss) / sum_train_iters
-
-        #   Validation Loss
-        val_loss, y_pred, X_val, y_val = evaluate(dl_val, clf, onehot_encoder, params)
+            for X_train, y_train in dl_train:
+                #print("Batch Idx: ", batch_idx, "     ", dt.datetime.now())
+                X_train_batch, X_train_seq_lens, seq_lens_idx = pad_lists(X_train)
+                X_train_batch = torch.tensor(X_train_batch).cuda()   
+                        
+                if scalar is True:
+                    #   sort y_train_batch
+                    y_train_batch = torch.tensor([[y_train[idx]] for idx in seq_lens_idx]).float().cuda()
+                else:
+                    #   convert list[list[int]] to padded 3d tensor (seq_len, batch_size, output_dim)                
+                    y_train_batch, y_train_seq_lens, seq_lens_idx = pad_lists(y_train, 
+                                                                              seq_lens_idx=seq_lens_idx)
+                    y_train_batch = lists2onehottensors(y_train_batch, output_dim, onehot_encoder,
+                                                        pad_token=0)
+                
+                #   Zero the gradient of the optimizer
+                optimizer.zero_grad()
+                
+                #   Forward pass
+                y_pred = clf.forward(X_train_batch, X_train_seq_lens)
+                loss = clf.compute_loss(y_pred, y_train_batch, X_train_seq_lens)
+            
+                sum_train_loss += loss.item()
+                sum_train_iters += 1
+            
+                loss.backward()     #   backward pass
+                optimizer.step()    #   update gradient step
+                
+                batch_idx += 1
+    
+            #   Average training loss
+            train_loss = float(sum_train_loss) / sum_train_iters
+    
+            #   Validation Loss
+            val_loss, y_pred, X_val, y_val = evaluate(dl_val, clf, onehot_encoder, params)
+            
+            print("Training Loss: " + str(train_loss) + "    Val Loss: " + str(val_loss))
+            train_file.write("Epoch: " + str(epoch) + "    Training Loss: " + str(train_loss) + 
+                             "    Val Loss: " + str(val_loss) + "\n")
+            train_file.close()          #   close file after writing to save
+            
+            #   print fixed validation case
+            y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
+            y_pred = int2phoneme(int_to_pho_dict, y_pred)
+            print(y_pred)
+    
+            #   save progress
+            if epoch % 2 == 0:
+                checkpoint = {'model': lstm_rnn(params),
+                              'state_dict': clf.state_dict(),
+                              'optimizer': optimizer.state_dict()}
+                file =  SAVE_DIR + filename + "_" + str(epoch) + ".pth"
+                torch.save(checkpoint, file)
+                
+            if best_loss > val_loss:
+                best_checkpoint = {'model': lstm_rnn(params),
+                              'state_dict': clf.state_dict(),
+                              'optimizer': optimizer.state_dict()}
+                best_epoch = epoch
+                best_loss = val_loss
         
-        print("Training Loss: " + str(train_loss) + "    Val Loss: " + str(val_loss))
-        train_file.write("Epoch: " + str(epoch) + "    Training Loss: " + str(train_loss) + 
-                         "    Val Loss: " + str(val_loss) + "\n")
-        train_file.close()          #   close file after writing to save
-        
-        #   print fixed validation case
-        y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
-        y_pred = int2phoneme(int_to_pho_dict, y_pred)
-        print(y_pred)
-
-        #   save progress
-        if epoch % 2 == 0:
-            checkpoint = {'model': lstm_rnn(params),
-                          'state_dict': clf.state_dict(),
-                          'optimizer': optimizer.state_dict()}
-            file =  SAVE_DIR + filename + "_" + str(epoch) + ".pth"
-            torch.save(checkpoint, file)
+        except KeyboardInterrupt:
+            print("Exiting training loop early...")
+            #   save best checkpoint
+            file =  SAVE_DIR + bestname + "_" + str(best_epoch) + ".pth"
+            torch.save(best_checkpoint, file)
+            print("Best Val Loss at Epoch " + str(best_epoch) + ": " + str(best_loss))
+            break
+    
+    #   save best checkpoint
+    file =  SAVE_DIR + bestname + "_" + str(best_epoch) + ".pth"
+    torch.save(best_checkpoint, file)
+    print("Best Val Loss at Epoch " + str(best_epoch) + ": " + str(best_loss))
         
     return clf
 
@@ -639,19 +667,19 @@ def main(params, load_model=False, train_model=True, verbose=False):
     if scalar is True:
         for sample in range(0, len(y_test)):
             print("Label: ", float(y_test[sample]), "    Predict: ", float(y_pred[sample]))
-            test_file.write("Label: ", float(y_test[sample]), "    Predict: ", 
-                            float(y_pred[sample]))
-        print("Loss: ", str(loss))
+            test_file.write("Label: " + str(float(y_test[sample])) + "    Predict: " +
+                            str(float(y_pred[sample])))
+        print("Loss: " + str(loss))
         
     else:
         for sample in range(0, len(y_test)):
             print("Label: ", y_test[sample])
             print("Predict: ", y_pred[sample])
-            test_file.write("Label: ", y_test[sample])
-            test_file.write("Predict: ", y_pred[sample])
+            test_file.write("Label: " + str(y_test[sample]))
+            test_file.write("Predict: " +  str(y_pred[sample]))
         print("Loss: ", str(loss))
     
-    test_file.write("Loss: ", str(loss))
+    test_file.write("Loss: " + str(loss))
     test_file.close()
     
 if __name__ == '__main__':
@@ -686,8 +714,9 @@ if __name__ == '__main__':
             'data_type':        data_type,
             'load_name':        'lstm_10.pth',
             'save_name':        'lstm',
+            'best_name':        'lstm_best',
             'train_report':     'lstm_report.txt',
-            'test_report':      'lstm_test.txt'
+            'test_report':      'lstm_test.txt',
     }
 
-    main(params, load_model=True, train_model=True, verbose=True)
+    main(params, load_model=False, train_model=True, verbose=True)
