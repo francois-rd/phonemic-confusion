@@ -24,6 +24,7 @@ Revisions:
                             Added epoch loss saving to report
                             Change scalar to RELU activation
                             Added in best model saving based on validation loss
+                            Added save_epoch to params 
                             
                             
 
@@ -347,6 +348,7 @@ def train(clf, onehot_encoder, params):
     output_dim = params['output_dim']
     filename = params['save_name']
     bestname = params['best_name']
+    save_epoch = params['save_epoch']
     
     #   name report file for writing
     train_filename = SAVE_DIR + str(dt.datetime.now()) + "_" + params['train_report']
@@ -443,7 +445,7 @@ def train(clf, onehot_encoder, params):
             print(y_pred)
     
             #   save progress
-            if epoch % 2 == 0:
+            if epoch % save_epoch == 0:
                 checkpoint = {'model': lstm_rnn(params),
                               'state_dict': clf.state_dict(),
                               'optimizer': optimizer.state_dict()}
@@ -712,11 +714,12 @@ if __name__ == '__main__':
             'scalar':           True,
             'align':            alignment,
             'data_type':        data_type,
+            'save_epoch':       10,
             'load_name':        'lstm_10.pth',
-            'save_name':        'lstm',
-            'best_name':        'lstm_best',
-            'train_report':     'lstm_report.txt',
-            'test_report':      'lstm_test.txt',
+            'save_name':        'lstm_scalar',
+            'best_name':        'lstm_scalar_best',
+            'train_report':     'lstm_scalar_report.txt',
+            'test_report':      'lstm_scalar_test.txt',
     }
 
     main(params, load_model=False, train_model=True, verbose=True)
