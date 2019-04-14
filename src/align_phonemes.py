@@ -4,8 +4,8 @@ import numpy as np
 NULL, DEL, INS_SAME, INS_DIFF = 'NULL', 'DEL', 'INS_SAME', 'INS_DIFF'
 ALIGNMENT_OPTS = ['none', 'hypothesis']
 OUTPUT_OPTS = ['full', 'abridged', 'binary', 'scalar']
-NONE_CODES = {'match': 1, 'sub': 2, 'del': 3, 'ins': 4}
-HYP_CODES = {'match': 1, 'sub': 2, 'del': 3, 'ins_same': 4, 'ins_diff': 5}
+NONE_CODES = {'match': 0, 'sub': 1, 'del': 2, 'ins': 3}
+HYP_CODES = {'match': 0, 'sub': 1, 'del': 2, 'ins_same': 3, 'ins_diff': 4}
 
 
 def load_data(data_dir, files):
@@ -154,7 +154,7 @@ class DataRecorder:
                         hyp.append(NONE_CODES['sub'])
                 hyp = ' '.join([str(h) for h in hyp])
             elif output == 'binary':
-                hyp = ' '.join([str(int(r != h) + 1) for r, h in ref_hyp])
+                hyp = ' '.join([str(int(r != h)) for r, h in ref_hyp])
             else:  # output == 'scalar'
                 hyp = str(np.count_nonzero([r != h for r, h in ref_hyp]))
         else:  # alignment == 'hypothesis'
@@ -189,9 +189,17 @@ class DataRecorder:
                         hyp_tmp.append(HYP_CODES['sub'])
                 hyp = ' '.join([str(h) for h in hyp_tmp])
             elif output == 'binary':
-                hyp = ' '.join([str(int(r != h) + 1) for r, h in zip(ref, hyp)])
+                hyp = ' '.join([str(int(r != h)) for r, h in zip(ref, hyp)])
             else:  # output == 'scalar'
-                hyp = str(np.count_nonzero([r != h for r, h in zip(ref, hyp)]))
+                hyp_tmp = []
+                for r, h in zip(ref, hyp):
+                    if r == h:
+                        hyp_tmp.append(0)
+                    elif h == INS_DIFF:
+                        hyp_tmp.append(2)
+                    else:
+                        hyp_tmp.append(1)
+                hyp = str(np.sum(hyp_tmp))
         print(' '.join(ref) + "\t" + hyp, file=self.files[(alignment, output)])
 
     def close(self):

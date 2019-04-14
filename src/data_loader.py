@@ -48,11 +48,10 @@ class DataLoader:
             if alignment == 'hypothesis':
                 lines.append('{} {} {}'.format(DEL, INS_SAME, INS_DIFF))
             phonemes = sorted(set([p for line in lines for p in line.split()]))
-        phoneme_to_int = {p: i + 1 for i, p in enumerate(phonemes)}
-        self.max_vocab_size = len(phoneme_to_int) + 1
+        phoneme_to_int = {p: i for i, p in enumerate(phonemes)}
         # Create the int2phoneme dictionary.
         if output == 'binary':
-            self.int_to_phoneme = {1: 'match', 2: 'not_match'}
+            self.int_to_phoneme = {0: 'match', 1: 'not_match'}
         elif output == 'abridged':
             if alignment == 'none':
                 self.int_to_phoneme = {v: k for k, v in NONE_CODES.items()}
@@ -68,15 +67,15 @@ class DataLoader:
         ref = [[phoneme_to_int[p] for p in l[0].split()] for l in lines]
         if output == 'full':
             hyp = [[phoneme_to_int[p] for p in l[1].split()] for l in lines]
-            self.vocab_size = len(phoneme_to_int) + 1
+            self.vocab_size = len(phoneme_to_int)
         elif output == 'binary' or output == 'abridged':
             hyp = [[int(b) for b in l[1].split()] for l in lines]
             if output == 'binary':
-                self.vocab_size = 3
+                self.vocab_size = 2
             elif alignment == 'none':
-                self.vocab_size = len(NONE_CODES) + 1
+                self.vocab_size = len(NONE_CODES)
             else:
-                self.vocab_size = len(HYP_CODES) + 1
+                self.vocab_size = len(HYP_CODES)
         else:  # output == 'scalar'
             hyp = [int(s[1]) for s in lines]
             self.vocab_size = 1
