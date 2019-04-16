@@ -1,5 +1,6 @@
 from src.phonemes import DATA_DIR, FILES, PHONEME_OUT, preprocess
 import numpy as np
+import json
 
 NULL, DEL, INS_SAME, INS_DIFF = 'NULL', 'DEL', 'INS_SAME', 'INS_DIFF'
 ALIGNMENT_OPTS = ['none', 'hypothesis']
@@ -69,7 +70,6 @@ def align_one(ref, hyp):
     """
     # Initialize.
     up, left, up_left, up_left_star = 0, 1, 2, 3
-    ref, hyp = ref.split(), hyp.split()
     n, m = len(ref), len(hyp)
     r, b = np.zeros((n + 1, m + 1)), np.zeros((n + 1, m + 1))
     r[0, :], b[0, :] = np.arange(m + 1), left
@@ -131,7 +131,7 @@ class DataRecorder:
 
         :param aligned_ref_hyp: a list of pairs of aligned phonemes
         """
-        print(aligned_ref_hyp, file=self.files[('raw', 'result')])
+        print(json.dumps(aligned_ref_hyp), file=self.files[('raw', 'result')])
         for alignment in ALIGNMENT_OPTS:
             for output in OUTPUT_OPTS:
                 self._modify_data_and_record(aligned_ref_hyp, alignment, output)
@@ -232,7 +232,7 @@ def align_all(refs, hyps, phonemes, data_dir, verbose=True):
         if not ref or not hyp:
             print('Skipping due to emtpy hypothesis or reference.')
             continue
-        data_recorder(align_one(ref, hyp))
+        data_recorder(align_one(ref.split(), hyp.split()))
     data_recorder.close()
 
 
