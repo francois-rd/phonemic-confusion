@@ -28,6 +28,7 @@ Revisions:
     2019-04-16      (AY)    Fixed fixed validation example bug in forwarding dataloader
     2019-04-17      (AY)    Fixed some CUDA errors
                             Changed pad_token from 0 to the last dimension of 1-hot vector
+                            Fixed padding truncation bug
 
 Helpful Links:
     PyTorch LSTM outputs : https://stackoverflow.com/questions/48302810/whats-the-difference-between-hidden-and-output-in-pytorch-lstm
@@ -297,7 +298,7 @@ def onehottensors2classlist(onehottensor, seq_lens):
     
     for idx in range(0, onehottensor.shape[1]):     # for every tensor sample in batch
         integer_list = []
-        tensor2d = onehottensor[:, idx, :]          # shape (seq_len, dim)
+        tensor2d = onehottensor[:seq_lens[idx], idx, :]          # shape (seq_len, dim)
         max_classes = tensor2d.max(dim=1)
         integer_list = max_classes[1].tolist()
         
