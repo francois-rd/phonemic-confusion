@@ -25,8 +25,7 @@ Revisions:
                             Change scalar to RELU activation
                             Added in best model saving based on validation loss
                             Added save_epoch to params 
-                            
-                            
+    2019-04-16      (AY)    Fixed fixed validation example bug in forwarding dataloader
 
 Helpful Links:
     PyTorch LSTM outputs : https://stackoverflow.com/questions/48302810/whats-the-difference-between-hidden-and-output-in-pytorch-lstm
@@ -82,12 +81,15 @@ class lstm_rnn(nn.Module):
         
         #   LSTM hidden layer
         self.lstm = nn.LSTM(self.embed_dim, self.hidden_dim, self.num_layers, 
-                            bidirectional=self.bidirectional)
-        
+                            bidirectional=self.bidirectional)    
+
+        #   Linear layers
         if self.bidirectional is True:
             self.linear = nn.Linear(self.hidden_dim*2, self.output_dim)
         else:
             self.linear = nn.Linear(self.hidden_dim, self.output_dim)
+    
+            
     
     def init_hidden_states(self, batch_size, bidirection=False):
         """
@@ -302,7 +304,7 @@ def onehottensors2classlist(onehottensor, seq_lens):
     
     return batch_list
 
-def pad_lists(lists, pad_token=0, seq_lens_idx=[]):
+def pad_lists(lists, pad_token=-1, seq_lens_idx=[]):
     """
     Pads unordered lists of different lengths to all have the same length (max length) and orders
     length descendingly
@@ -360,19 +362,22 @@ def train(clf, onehot_encoder, params):
     
     dl_train = DataLoader(DATA_DIR, PHONEME_OUT, params['align'],
                     params['data_type'], 'train', batch_size = params['batch_size'])
+    
     dl_val = DataLoader(DATA_DIR, PHONEME_OUT, params['align'],
                     params['data_type'], 'val', batch_size = params['batch_size'])
     int_to_pho_dict = dl_val.int_to_phoneme
     
-    #   Create optimizer
-
-    optimizer = torch.optim.Adam(list(clf.parameters()), lr=lr)
-
     #   consistent validation case
-
     X_fixed_batch, y_fixed_batch = dl_val.__iter__().__next__()                 #   gets a single batch
     X_fixed = X_fixed_batch[2]
     y_fixed = y_fixed_batch[2]
+    
+    #   restart validation dataloader
+    dl_val = DataLoader(DATA_DIR, PHONEME_OUT, params['align'],
+                    params['data_type'], 'val', batch_size = params['batch_size'])
+    
+    #   Create optimizer
+    optimizer = torch.optim.Adam(list(clf.parameters()), lr=lr)
     
     y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
 
@@ -705,12 +710,12 @@ if __name__ == '__main__':
             'embed_dim':        input_dim,
             'hidden_dim':       25,            
             'output_dim':       output_dim,              
-            'num_layers':       1,
+            'num_layers':       5,
             'batch_size':       256,
             'num_epochs':       200,
             'learning_rate':    0.05,
             'learning_decay':   0.9,
-            'bidirectional':    False,
+            'bidirectional':    True,
             'scalar':           True,
             'align':            alignment,
             'data_type':        data_type,
