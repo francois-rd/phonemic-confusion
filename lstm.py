@@ -136,7 +136,7 @@ class lstm_rnn(nn.Module):
         self.cell_state = self.init_cell_state(batch_size, self.bidirectional).cuda()
         
         #   X input shape (batch_size, max(seq_lens))
-        #   output shape (batch_size x max(seq_lens) x input_dim)
+        #   output shape (batch_size x max(seq_lens) x embed_dim)
         X = self.embedding(X.cuda())
 
         X = self.tensors2packedseq(X, seq_lens)
@@ -219,13 +219,14 @@ class lstm_rnn(nn.Module):
             return F.binary_cross_entropy(y_flatten, target_flatten)
 
 
-    def tensors2packedseq(self, tensors, seq_lens):
+    def tensors2packedseq(self, tensors, seq_lens, pad_token=0):
         """
         Converts an ordered 3d padded tensor (with ORIGINALLY variable sequence lengths) to a PackedSequence
         datatype)
         Arguments:
             tensors (torch.tensor) : padded input tensor of shape (batch_size, max_seq_len, input_dim)
             seq_lens (list[int]) : unpadded sequence length of each tensor in tensors[a, :, :]
+            pad_token (int) : value representing padding
         Returns:
             packedseq (PackedSequence) : a PackedSequence type of batch of input tensors 
         """
@@ -233,24 +234,25 @@ class lstm_rnn(nn.Module):
         #   convert 3d tensor to list of 2d tensors
         tensor_list = []
         for idx in range(tensors.shape[0]):                    #   for every sample in batch
-            tensor_list.append(tensors[idx, :, :])
+            tensor_list.append(tensors[idx, :seq_lens[idx], :])
 
-        packedseq = nn.utils.rnn.pad_sequence(tensor_list)  #   tensor (seq_len, batch_size, input_dim)
+        packedseq = nn.utils.rnn.pad_sequence(tensor_list, padding_value=pad_token)  #   tensor (seq_len, batch_size, input_dim)
         packedseq = nn.utils.rnn.pack_padded_sequence(packedseq, seq_lens)
     
         return packedseq
     
-    def packedseq2tensors(self, packedseq):
+    def packedseq2tensors(self, packedseq, pad_token=0):
         """
         Converts a PackedSequence to a tuple containing tensors of variable lengths 
         datatype)
         Arguments:
             packedseq (PackedSequence) : a PackedSequence type of batch of input tensors 
+            pad_token (int) : value representing padding
         Returns:
             tensors (torch.tensor) : padded input tensors of shape (seq_len, batch_size, input_dim)
             seq_lens (torch.tensor) : tensor containing the seq_len of each input tensor (seq_len, )
         """       
-        tensors, seq_lens = nn.utils.rnn.pad_packed_sequence(packedseq)
+        tensors, seq_lens = nn.utils.rnn.pad_packed_sequence(packedseq, padding_value=pad_token)
         tensors = tensors.contiguous()
         
         return tensors, seq_lens
@@ -262,7 +264,6 @@ def lists2onehottensors(lists, dim, onehot_encoder):
         lists (list[list[int]]) : list of integers lists with all internal lists of equal length
         onehot_encoder (class OneHotEncoder) : encoder for 1-hot encoding using OneHotEncoder
         dim (int) : number of output dimensions for 1 hot tensor
-    Returns:
         tensor (torch.tensor) : padded 3d tensor of shape (max(seq_len),, batch_size, dim)
     """        
     tensor_list = []
@@ -384,12 +385,12 @@ def train(clf, onehot_encoder, params):
     
     y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
 
-#    X_fixed_phoneme = int2phoneme(full_dict, X_fixed)
-#    y_fixed_phoneme = int2phoneme(int_to_pho_dict, y_fixed)
-#    y_pred = int2phoneme(int_to_pho_dict, y_pred)
-#    print("X_fixed: ", X_fixed_phoneme)
-#    print("y_fixed: ", y_fixed_phoneme)
-#    print("y_pred: ", y_pred)
+    X_fixed_phoneme = int2phoneme(full_dict, X_fixed)
+    y_fixed_phoneme = int2phoneme(int_to_pho_dict, y_fixed)
+    y_pred = int2phoneme(int_to_pho_dict, y_pred)
+    print("X_fixed: ", X_fixed_phoneme)
+    print("y_fixed: ", y_fixed_phoneme)
+    print("y_pred: ", y_pred)
 
     #   best model parameters
     best_loss = 9999999999999           #   infinitely high
@@ -407,6 +408,7 @@ def train(clf, onehot_encoder, params):
             train_file = open(train_filename, "a+")
             
             for X_train, y_train in dl_train:
+                #   theoretically, the padding token doesn't matter since its embedded version will be removed by sequence length
                 X_train_batch, X_train_seq_lens, seq_lens_idx = pad_lists(X_train, pad_token=input_dim-1)
                 X_train_batch = torch.tensor(X_train_batch).cuda()   
                         
@@ -447,8 +449,8 @@ def train(clf, onehot_encoder, params):
             
             #   print fixed validation case
             y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
-#            y_pred = int2phoneme(int_to_pho_dict, y_pred)
-#            print(y_pred)
+            y_pred = int2phoneme(int_to_pho_dict, y_pred)
+            print(y_pred)
     
             #   save progress
             if epoch % save_epoch == 0:
