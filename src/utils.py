@@ -26,4 +26,4 @@ def int2phoneme(int_to_phoneme, int_list):
     """
     if int_to_phoneme is None:
         return int_list
-    return [int_to_phoneme[i].get(i, "KEY_ERROR:" + str(i)) for i in int_list]
+    return [int_to_phoneme.get(i, "KEY_ERROR:" + str(i)) for i in int_list]
