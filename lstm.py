@@ -26,6 +26,8 @@ Revisions:
                             Added in best model saving based on validation loss
                             Added save_epoch to params 
     2019-04-16      (AY)    Fixed fixed validation example bug in forwarding dataloader
+    2019-04-17      (AY)    Fixed some CUDA errors
+                            Changed pad_token from 0 to the last dimension of 1-hot vector
 
 Helpful Links:
     PyTorch LSTM outputs : https://stackoverflow.com/questions/48302810/whats-the-difference-between-hidden-and-output-in-pytorch-lstm
