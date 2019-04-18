@@ -31,7 +31,11 @@ Revisions:
                             Fixed padding truncation bug
                             Fixed seq_lens bug in tensors2packedseq() / packedseq2tensors()
     **Separated from lstm.py**
-    2019-04-17      (AY)    Add in skip connections and ReLU Linear layers
+    2019-04-17      (AY)    Add in skip connections and ReLU Linear layers - runs with "full", "abridged" (haven't changed "binary" to output_dim=1 yet)
+                            Skip connections do NOT work for scalar case because output of LSTM (num_layers x batch_size x hidden_dim) does 
+                                not align with embedding (seq_len x batch_size x hidden_dim)
+                                
+                            
     
 
 Helpful Links:
@@ -81,6 +85,7 @@ class lstm_rnn(nn.Module):
         self.bidirectional = params['bidirectional']
         self.scalar = params['scalar']
         self.batch_size = params['batch_size']
+        self.data_type = params['data_type']
         
         self.hidden_states = self.init_hidden_states(self.bidirectional).cuda()
         self.cell_state = self.init_cell_state(self.bidirectional).cuda()
@@ -101,8 +106,7 @@ class lstm_rnn(nn.Module):
             print("WARNING: Hidden_dim (*2) + embed_dim is less than linear_dim1!!!")    
         self.linear_dim2 = self.in_linear_dim - self.linear_dim1
 
-        #   list of linear layers
-        
+        #   list of linear layers       
         self.first_linear = []
         self.second_linear = []
         for i in range(0, self.num_linear_layers):
@@ -181,8 +185,17 @@ class lstm_rnn(nn.Module):
         #           final_hidden_states[-1] however will only output UP TO the seq_len
         #               where there is input (i.e. ignore all NULL outputs)
         
+        #if self.scalar is True:
+        #    if self.bidirectional is True:
+                #   stack the hidden_states of the last reverse layer [-1] (leftmost) and the
+                #   last forward layer[-2] (rightmost)    
+        #        in_linear = torch.cat((final_hidden_states[-1], 
+        #                                        final_hidden_states[-2]), dim=1)
+        #    else:
+        #        in_linear = final_hidden_states[-1]
+        #else:    
         in_linear = torch.cat((lstm_out, embedded_X.transpose(dim0=0, dim1=1)), dim=2).cuda()        #   concatenate to (max(seq_lens), batch_size, embed_dim+hidden_dim)
-
+        
         #   linear layers
         for layer in range(0, self.num_linear_layers):
             linear1 = F.relu(self.first_linear[layer](in_linear))                     #   (max(seq_lens), batch_size, linear_dim)
@@ -192,20 +205,12 @@ class lstm_rnn(nn.Module):
         linear3 = torch.cat((in_linear, embedded_X.transpose(dim0=0, dim1=1)), dim=2)       #   (max(seq_lens), batch_size, embed_dim*2 + hidden_dim)
         
         if self.scalar is True:
-            if self.bidirectional is True:
-                #   stack the hidden_states of the last reverse layer [-1] (leftmost) and the
-                #   last forward layer[-2] (rightmost)
-                final_hidden_state = torch.cat((final_hidden_states[-1], 
-                                                final_hidden_states[-2]), dim=1)
-            else:
-                final_hidden_state = final_hidden_states[-1]
-            y_pred = F.relu(self.out_linear(final_hidden_state))
-            #y_pred = torch.mul(y_pred, torch.tensor(seq_lens).unsqueeze(1).float().cuda())          #   scale to number of errors from error rate
-
+            y_pred = F.relu(self.out_linear(linear3))
         else:
             #   bidirectional lstm is already concatenated
             y_pred = F.softmax(self.out_linear(linear3), dim=2)
-        
+            if data_type == 'binary':
+                y_pred = y_pred[:, :, -1]                 # take the second class (1) (i.e. sigmoid)
         return y_pred
         
     def compute_loss(self, y, target, seq_lens=[]):
@@ -405,6 +410,12 @@ def train(clf, onehot_encoder, params):
     X_fixed = X_fixed_batch[2]
     y_fixed = y_fixed_batch[2]
     
+    
+    X_fixed_phoneme = int2phoneme(full_dict, X_fixed)
+    y_fixed_phoneme = int2phoneme(int_to_pho_dict, y_fixed)
+    print("X_fixed: ", X_fixed_phoneme)
+    print("y_fixed: ", y_fixed_phoneme)
+    
     #   restart validation dataloader
     dl_val = DataLoader(DATA_DIR, PHONEME_OUT, params['align'],
                     params['data_type'], 'val', batch_size = params['batch_size'])
@@ -414,11 +425,7 @@ def train(clf, onehot_encoder, params):
     
     y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
 
-    X_fixed_phoneme = int2phoneme(full_dict, X_fixed)
-    y_fixed_phoneme = int2phoneme(int_to_pho_dict, y_fixed)
     y_pred = int2phoneme(int_to_pho_dict, y_pred)
-    print("X_fixed: ", X_fixed_phoneme)
-    print("y_fixed: ", y_fixed_phoneme)
     print("y_pred: ", y_pred)
 
     #   best model parameters
@@ -557,6 +564,7 @@ def predict(X, y, clf, onehot_encoder, params):
     Returns:
         y_pred (list[int]) : a list of integers with each integer the prediction of each step
     """
+    data_type = params['data_type']
     scalar = params['scalar']
     output_dim = params['output_dim']
     
@@ -568,6 +576,8 @@ def predict(X, y, clf, onehot_encoder, params):
     else:
         seq_len = [len(y)]              #   2d list
     
+    print("y: ", y)
+    
     if scalar is True:
         y = torch.tensor([[y]]).cuda().float().cuda()         #   shape(1,)
     else:
@@ -575,6 +585,13 @@ def predict(X, y, clf, onehot_encoder, params):
         #   change to 1-hot
 
     y_pred = clf.forward(X, seq_len)
+    
+    
+    print("y_pred: ", y_pred)
+    
+    print('y.shape: ', y.shape)
+    print('y_pred.shape: ', y_pred.shape)
+    
     loss = clf.compute_loss(y_pred, y, seq_len)
     loss = loss.item()
     
@@ -725,7 +742,7 @@ if __name__ == '__main__':
     
     #torch.manual_seed = 1
     alignment = 'hypothesis'
-    data_type = 'full'
+    data_type = 'binary'
 
     
     #   get input dim (always 44)
@@ -743,8 +760,8 @@ if __name__ == '__main__':
             'hidden_dim':           25,
             'linear_dim':           20,            
             'output_dim':           output_dim,              
-            'num_lstm_layers':      1,
-            'num_linear_layers':    2,
+            'num_lstm_layers':      5,
+            'num_linear_layers':    4,
             'batch_size':           256,
             'num_epochs':           200,
             'learning_rate':        0.05,
