@@ -34,6 +34,7 @@ Revisions:
     2019-04-17      (AY)    Add in skip connections and ReLU Linear layers - runs with "full", "abridged" (haven't changed "binary" to output_dim=1 yet)
                             Skip connections do NOT work for scalar case because output of LSTM (num_layers x batch_size x hidden_dim) does 
                                 not align with embedding (seq_len x batch_size x hidden_dim)
+                            Changed all self.scalar if-statements to be based on self.data_type
                                 
                             
     
@@ -204,7 +205,7 @@ class lstm_rnn(nn.Module):
         
         linear3 = torch.cat((in_linear, embedded_X.transpose(dim0=0, dim1=1)), dim=2)       #   (max(seq_lens), batch_size, embed_dim*2 + hidden_dim)
         
-        if self.scalar is True:
+        if self.data_type == 'scalar':
             y_pred = F.relu(self.out_linear(linear3))
         else:
             #   bidirectional lstm is already concatenated
@@ -225,7 +226,7 @@ class lstm_rnn(nn.Module):
         Returns:
             loss (torch.tensor) : MSE loss of y (self.scalar=True)
         """
-        if self.scalar is True:          
+        if self.data_type == 'scalar':          
             return F.mse_loss(y, target)
         else:
             if len(seq_lens) != y.shape[1] or y.shape[1] != target.shape[1]: 
@@ -383,6 +384,7 @@ def train(clf, onehot_encoder, params):
     """
     num_epochs = params['num_epochs']
     lr = params['learning_rate']
+    data_type = params['data_type']
     scalar = params['scalar']
     input_dim = params['input_dim']
     output_dim = params['output_dim']
@@ -448,7 +450,7 @@ def train(clf, onehot_encoder, params):
                 X_train_batch, X_train_seq_lens, seq_lens_idx = pad_lists(X_train, pad_token=input_dim-1)
                 X_train_batch = torch.tensor(X_train_batch).cuda()   
                         
-                if scalar is True:
+                if data_type == 'scalar':
                     #   sort y_train_batch
                     y_train_batch = torch.tensor([[y_train[idx]] for idx in seq_lens_idx]).float().cuda()
                 else:
@@ -521,6 +523,7 @@ def train(clf, onehot_encoder, params):
 def evaluate(dataloader, clf, onehot_encoder, params):
     
     scalar = params['scalar']
+    data_type = params['data_type']
     input_dim = params['input_dim']
     output_dim = params['output_dim']
     
@@ -532,7 +535,7 @@ def evaluate(dataloader, clf, onehot_encoder, params):
         X_test_batch, X_test_seq_lens, seq_lens_idx = pad_lists(X_test, pad_token=input_dim-1)
         X_test_batch = torch.tensor(X_test_batch)
         
-        if scalar is True:
+        if data_type == 'scalar':
             #   sort y_train_batch
             y_test_batch = torch.tensor([[y_test[idx]] for idx in seq_lens_idx]).float().cuda()
         else:
@@ -546,7 +549,7 @@ def evaluate(dataloader, clf, onehot_encoder, params):
         sum_loss += loss.item()
         num_iters += 1
         
-        if scalar is False:
+        if data_type != 'scalar':
             #   convert softmax y_pred and y to 1d list
             y_test_batch = onehottensors2classlist(y_test_batch, X_test_seq_lens)
             y_pred = onehottensors2classlist(y_pred, X_test_seq_lens)
@@ -571,14 +574,14 @@ def predict(X, y, clf, onehot_encoder, params):
     X = torch.tensor(X).cuda()         #   shape(seq_len,)
     X = X.unsqueeze(0)          #   shape(batch_size=1, seq_len)
     
-    if scalar is True:
+    if data_type == 'scalar':
         seq_len = [X.shape[1]]
     else:
         seq_len = [len(y)]              #   2d list
     
     print("y: ", y)
     
-    if scalar is True:
+    if data_type == 'scalar':
         y = torch.tensor([[y]]).cuda().float().cuda()         #   shape(1,)
     else:
         y = lists2onehottensors([y], output_dim, onehot_encoder)
@@ -595,7 +598,7 @@ def predict(X, y, clf, onehot_encoder, params):
     loss = clf.compute_loss(y_pred, y, seq_len)
     loss = loss.item()
     
-    if scalar is False:
+    if data_type != 'scalar':
         #   convert softmax y_pred and y to 1d list
         y_pred = onehottensors2classlist(y_pred, seq_len)[0]
     
@@ -681,6 +684,7 @@ def load_checkpoint(filename):
 def main(params, load_model=False, train_model=True, verbose=False):
     
     scalar = params['scalar']
+    data_type = params['data_type']
     output_dim = params['output_dim']
     
     #   initialize classifier
@@ -688,7 +692,7 @@ def main(params, load_model=False, train_model=True, verbose=False):
         print("Initializing classifier...")
     
     #   checks
-    if scalar is True and params['output_dim'] != 1:
+    if data_type == 'scalar' and output_dim != 1:
         print("WARNING: Scalar is True but output dim is NOT set to 1...")
         print("Automatically setting to 1...")
         params['output_dim'] = 1
@@ -720,7 +724,7 @@ def main(params, load_model=False, train_model=True, verbose=False):
     test_file = open(SAVE_DIR + str(dt.datetime.now()) + "_" 
                           + params['test_report'], "w")
     
-    if scalar is True:
+    if data_type == 'scalar':
         for sample in range(0, len(y_test)):
             print("Label: ", float(y_test[sample]), "    Predict: ", float(y_pred[sample]))
             test_file.write("Label: " + str(float(y_test[sample])) + "    Predict: " +
@@ -742,9 +746,8 @@ if __name__ == '__main__':
     
     #torch.manual_seed = 1
     alignment = 'hypothesis'
-    data_type = 'binary'
+    data_type = 'abridged'
 
-    
     #   get input dim (always 44)
     dl_1 = DataLoader(DATA_DIR, PHONEME_OUT, alignment, 'full', 'val', batch_size=4)
     input_dim = dl_1.vocab_size
