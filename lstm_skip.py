@@ -31,7 +31,7 @@ Revisions:
                             Fixed padding truncation bug
                             Fixed seq_lens bug in tensors2packedseq() / packedseq2tensors()
     **Separated from lstm.py**
-    2019-04-17      (AY)    Add in skip connections and ReLU Linear layers - runs with "full", "abridged" (haven't changed "binary" to output_dim=1 yet)
+    2019-04-17      (AY)    Add in skip connections and ReLU Linear layers - runs with "full", "abridged", "binary"
                             Skip connections do NOT work for scalar case because output of LSTM (num_layers x batch_size x hidden_dim) does 
                                 not align with embedding (seq_len x batch_size x hidden_dim)
                             Changed all self.scalar if-statements to be based on self.data_type
@@ -84,7 +84,6 @@ class lstm_rnn(nn.Module):
         self.num_lstm_layers = params['num_lstm_layers']
         self.num_linear_layers = params['num_linear_layers']
         self.bidirectional = params['bidirectional']
-        self.scalar = params['scalar']
         self.batch_size = params['batch_size']
         self.data_type = params['data_type']
         
@@ -207,11 +206,12 @@ class lstm_rnn(nn.Module):
         
         if self.data_type == 'scalar':
             y_pred = F.relu(self.out_linear(linear3))
+        elif self.data_type == 'binary':
+            y_pred = F.sigmoid(self.out_linear(linear3))
         else:
             #   bidirectional lstm is already concatenated
             y_pred = F.softmax(self.out_linear(linear3), dim=2)
-            if data_type == 'binary':
-                y_pred = y_pred[:, :, -1]                 # take the second class (1) (i.e. sigmoid)
+
         return y_pred
         
     def compute_loss(self, y, target, seq_lens=[]):
@@ -228,6 +228,7 @@ class lstm_rnn(nn.Module):
         """
         if self.data_type == 'scalar':          
             return F.mse_loss(y, target)
+        
         else:
             if len(seq_lens) != y.shape[1] or y.shape[1] != target.shape[1]: 
                 
@@ -250,8 +251,10 @@ class lstm_rnn(nn.Module):
                 else:
                     y_flatten = torch.cat((y_flatten, y_tensor1D))
                     target_flatten = torch.cat((target_flatten, target_tensor1D))
-            
-            return F.binary_cross_entropy(y_flatten, target_flatten)
+            if data_type == 'binary':
+                return F.mse_loss(y_flatten, target_flatten)
+            else:
+                return F.binary_cross_entropy(y_flatten, target_flatten)
 
 
     def tensors2packedseq(self, tensors, seq_lens, pad_token=0):
@@ -385,7 +388,6 @@ def train(clf, onehot_encoder, params):
     num_epochs = params['num_epochs']
     lr = params['learning_rate']
     data_type = params['data_type']
-    scalar = params['scalar']
     input_dim = params['input_dim']
     output_dim = params['output_dim']
     filename = params['save_name']
@@ -457,7 +459,11 @@ def train(clf, onehot_encoder, params):
                     #   convert list[list[int]] to padded 3d tensor (seq_len, batch_size, output_dim)                
                     y_train_batch, y_train_seq_lens, seq_lens_idx = pad_lists(y_train, pad_token=output_dim-1,
                                                                               seq_lens_idx=seq_lens_idx)
-                    y_train_batch = lists2onehottensors(y_train_batch, output_dim, onehot_encoder)
+                    if data_type == 'binary':
+                        y_train_batch = torch.tensor([y_train_batch]).cuda().float().cuda()
+                        y_train_batch = y_train_batch.transpose(dim0=0, dim1=2)
+                    else:
+                        y_train_batch = lists2onehottensors(y_train_batch, output_dim, onehot_encoder)
                 
                 #   Zero the gradient of the optimizer
                 optimizer.zero_grad()
@@ -522,7 +528,6 @@ def train(clf, onehot_encoder, params):
 
 def evaluate(dataloader, clf, onehot_encoder, params):
     
-    scalar = params['scalar']
     data_type = params['data_type']
     input_dim = params['input_dim']
     output_dim = params['output_dim']
@@ -542,7 +547,11 @@ def evaluate(dataloader, clf, onehot_encoder, params):
             #   convert list[list[int]] to padded 3d tensor (seq_len, batch_size, output_dim)
             y_test_batch, y_test_seq_lens, seq_lens_idx = pad_lists(y_test, pad_token=output_dim-1,
                                                                     seq_lens_idx=seq_lens_idx)        
-            y_test_batch = lists2onehottensors(y_test_batch, output_dim, onehot_encoder)
+            if data_type == 'binary':
+                y_test_batch = torch.tensor([y_test_batch]).cuda().float().cuda()
+                y_test_batch = y_test_batch.transpose(dim0=0, dim1=2)
+            else:
+                y_test_batch = lists2onehottensors(y_test_batch, output_dim, onehot_encoder)
             
         y_pred = clf.forward(X_test_batch, X_test_seq_lens)
         loss = clf.compute_loss(y_pred, y_test_batch, X_test_seq_lens)
@@ -568,7 +577,6 @@ def predict(X, y, clf, onehot_encoder, params):
         y_pred (list[int]) : a list of integers with each integer the prediction of each step
     """
     data_type = params['data_type']
-    scalar = params['scalar']
     output_dim = params['output_dim']
     
     X = torch.tensor(X).cuda()         #   shape(seq_len,)
@@ -579,22 +587,16 @@ def predict(X, y, clf, onehot_encoder, params):
     else:
         seq_len = [len(y)]              #   2d list
     
-    print("y: ", y)
-    
-    if data_type == 'scalar':
+    if data_type == 'scalar' or data_type == 'binary':
         y = torch.tensor([[y]]).cuda().float().cuda()         #   shape(1,)
+        if data_type == 'binary':
+            y = y.transpose(dim0=0, dim1=2)                     #   transpose to match shape of y_pred
     else:
         y = lists2onehottensors([y], output_dim, onehot_encoder)
         #   change to 1-hot
 
     y_pred = clf.forward(X, seq_len)
-    
-    
-    print("y_pred: ", y_pred)
-    
-    print('y.shape: ', y.shape)
-    print('y_pred.shape: ', y_pred.shape)
-    
+
     loss = clf.compute_loss(y_pred, y, seq_len)
     loss = loss.item()
     
@@ -682,8 +684,7 @@ def load_checkpoint(filename):
     
 
 def main(params, load_model=False, train_model=True, verbose=False):
-    
-    scalar = params['scalar']
+
     data_type = params['data_type']
     output_dim = params['output_dim']
     
@@ -692,8 +693,8 @@ def main(params, load_model=False, train_model=True, verbose=False):
         print("Initializing classifier...")
     
     #   checks
-    if data_type == 'scalar' and output_dim != 1:
-        print("WARNING: Scalar is True but output dim is NOT set to 1...")
+    if (data_type == 'scalar' or data_type == 'binary') and output_dim != 1:
+        print("WARNING: Scalar/Binary is True but output dim is NOT set to 1...")
         print("Automatically setting to 1...")
         params['output_dim'] = 1
     
@@ -770,7 +771,6 @@ if __name__ == '__main__':
             'learning_rate':        0.05,
             'learning_decay':       0.9,
             'bidirectional':        False,
-            'scalar':               False,
             'align':                alignment,
             'data_type':            data_type,
             'save_epoch':           10,
