@@ -34,10 +34,10 @@ Revisions:
     2019-04-17      (AY)    Add in skip connections and ReLU Linear layers - runs with "full", "abridged", "binary"
                             Skip connections do NOT work for scalar case because output of LSTM (num_layers x batch_size x hidden_dim) does 
                                 not align with embedding (seq_len x batch_size x hidden_dim)
-                            Changed all self.scalar if-statements to be based on self.data_type
-                                
-                            
-    
+                            Changed all self.scalar if-statements to be based on self.data_type 
+                            Add params to reduce number of batches per epoch - not very efficient (seems like smaller the batch_size, longer it takes
+                                                                                                   to load dataloader)
+                            Add learning decay to Adam
 
 Helpful Links:
     PyTorch LSTM outputs : https://stackoverflow.com/questions/48302810/whats-the-difference-between-hidden-and-output-in-pytorch-lstm
@@ -386,7 +386,9 @@ def train(clf, onehot_encoder, params):
         clf (class) : the trained model
     """
     num_epochs = params['num_epochs']
+    num_batches = params['num_batches']
     lr = params['learning_rate']
+    ld = params['learning_decay']
     data_type = params['data_type']
     input_dim = params['input_dim']
     output_dim = params['output_dim']
@@ -411,8 +413,8 @@ def train(clf, onehot_encoder, params):
     
     #   consistent validation case
     X_fixed_batch, y_fixed_batch = dl_val.__iter__().__next__()                 #   gets a single batch
-    X_fixed = X_fixed_batch[2]
-    y_fixed = y_fixed_batch[2]
+    X_fixed = X_fixed_batch[0]
+    y_fixed = y_fixed_batch[0]
     
     
     X_fixed_phoneme = int2phoneme(full_dict, X_fixed)
@@ -425,7 +427,7 @@ def train(clf, onehot_encoder, params):
                     params['data_type'], 'val', batch_size = params['batch_size'])
     
     #   Create optimizer
-    optimizer = torch.optim.Adam(list(clf.parameters()), lr=lr)
+    optimizer = torch.optim.Adam(list(clf.parameters()), lr=lr, weight_decay=ld)
     
     y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
 
@@ -446,6 +448,10 @@ def train(clf, onehot_encoder, params):
             
             #   open report file for writing
             train_file = open(train_filename, "a+")
+            
+            if num_batches > 0:                         #   if not full batches
+                dl_train = DataLoader(DATA_DIR, PHONEME_OUT, params['align'],
+                        params['data_type'], 'train', batch_size = params['batch_size'])
             
             for X_train, y_train in dl_train:
                 #   theoretically, the padding token doesn't matter since its embedded version will be removed by sequence length
@@ -479,6 +485,10 @@ def train(clf, onehot_encoder, params):
                 optimizer.step()    #   update gradient step
                 
                 batch_idx += 1
+                
+                if batch_idx >= num_batches > 0:
+                    break
+            
     
             #   Average training loss
             train_loss = float(sum_train_loss) / sum_train_iters
@@ -494,7 +504,7 @@ def train(clf, onehot_encoder, params):
             #   print fixed validation case
             y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
             y_pred = int2phoneme(int_to_pho_dict, y_pred)
-            print(y_pred)
+            #print(y_pred)
     
             #   save progress
             if epoch % save_epoch == 0:
@@ -747,7 +757,7 @@ if __name__ == '__main__':
     
     #torch.manual_seed = 1
     alignment = 'hypothesis'
-    data_type = 'abridged'
+    data_type = 'binary'
 
     #   get input dim (always 44)
     dl_1 = DataLoader(DATA_DIR, PHONEME_OUT, alignment, 'full', 'val', batch_size=4)
@@ -761,19 +771,20 @@ if __name__ == '__main__':
     params = {
             'input_dim':            input_dim,
             'embed_dim':            input_dim,
-            'hidden_dim':           25,
-            'linear_dim':           20,            
+            'hidden_dim':           100,
+            'linear_dim':           40,            
             'output_dim':           output_dim,              
-            'num_lstm_layers':      5,
-            'num_linear_layers':    4,
-            'batch_size':           256,
+            'num_lstm_layers':      20,
+            'num_linear_layers':    20,
+            'batch_size':           2,
             'num_epochs':           200,
-            'learning_rate':        0.05,
-            'learning_decay':       0.9,
+            'learning_rate':        0.01,
+            'learning_decay':       0.0,
             'bidirectional':        False,
             'align':                alignment,
             'data_type':            data_type,
             'save_epoch':           10,
+            'num_batches':          1,                      #   set to 0 or -1 for all batches
             'load_name':            'lstm_10.pth',
             'save_name':            'lstm_scalar',
             'best_name':            'lstm_scalar_best',
