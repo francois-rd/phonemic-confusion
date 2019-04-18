@@ -38,6 +38,9 @@ Revisions:
                             Add params to reduce number of batches per epoch - not very efficient (seems like smaller the batch_size, longer it takes
                                                                                                    to load dataloader)
                             Add learning decay to Adam
+                            Add show_validation parameter for train() (does not work with small batch_size for some reason)
+                            Modify the training loop to load all training batches before beginning
+                            Add show_train parameter for train() (might be buggy)
 
 Helpful Links:
     PyTorch LSTM outputs : https://stackoverflow.com/questions/48302810/whats-the-difference-between-hidden-and-output-in-pytorch-lstm
@@ -251,10 +254,10 @@ class lstm_rnn(nn.Module):
                 else:
                     y_flatten = torch.cat((y_flatten, y_tensor1D))
                     target_flatten = torch.cat((target_flatten, target_tensor1D))
-            if data_type == 'binary':
-                return F.mse_loss(y_flatten, target_flatten)
-            else:
-                return F.binary_cross_entropy(y_flatten, target_flatten)
+#            if data_type == 'binary':
+#                return F.mse_loss(y_flatten, target_flatten)
+#            else:
+            return F.binary_cross_entropy(y_flatten, target_flatten)
 
 
     def tensors2packedseq(self, tensors, seq_lens, pad_token=0):
@@ -345,6 +348,31 @@ def onehottensors2classlist(onehottensor, seq_lens):
     
     return batch_list
 
+def tensors2classlist(tensor, seq_lens):
+    """
+    Converts a 3d tensor (max(seq_len), batch_size, output_dim=1) to a 2d class list (list[batch_size  * list[seq_len]])
+        where each class is a unique integer
+    Arguments:
+        tensor (torch.tensor) : 3d padded tensor of different sequence lengths of
+            shape (max(seq_lens), batch_size, output_dim=1)
+        seq_lens (list[int]) : length of each of the sequences without padding 
+            (i.e. onehottensor.shape[1] without padding)
+    Returns:
+        batch_list (list[list[int]]) : list of class lists with each internal list corresponding
+            to a sequence and each class in the internal list corresponding to a class for 
+            each step of the sequence
+    """
+    batch_list = []
+    
+    for idx in range(0, tensor.shape[1]):     # for every tensor sample in batch
+        integer_list = []
+        tensor2d = tensor[:seq_lens[idx], idx, :]          # shape (seq_len, dim=1)
+        integer_list = tensor2d.squeeze().tolist()
+        
+        batch_list.append(integer_list)
+    
+    return batch_list
+
 def pad_lists(lists, pad_token, seq_lens_idx=[]):
     """
     Pads unordered lists of different lengths to all have the same length (max length) and orders
@@ -376,7 +404,7 @@ def pad_lists(lists, pad_token, seq_lens_idx=[]):
     return ordered_lists, ordered_seq_lens, seq_lens_idx
 
 
-def train(clf, onehot_encoder, params):
+def train(clf, onehot_encoder, params, show_validation=True, show_train=False):
     """
     Trains the model given training data.
     Arguments:
@@ -438,6 +466,20 @@ def train(clf, onehot_encoder, params):
     best_loss = 9999999999999           #   infinitely high
     best_epoch = -1
 
+    X_train_batches = []
+    y_train_batches = []
+
+    batch_count = 0
+    
+    for X_train, y_train in dl_train:
+        X_train_batches.append(X_train)
+        y_train_batches.append(y_train)
+        batch_count += 1
+        #   stops getting batches when more than num_batches
+        #   continue getting batches if num_batch <= 0
+        if batch_count >= num_batches and num_batches > 0:
+            break
+
     for epoch in range(0, num_epochs):
         try:
             batch_idx = 0        
@@ -448,64 +490,97 @@ def train(clf, onehot_encoder, params):
             
             #   open report file for writing
             train_file = open(train_filename, "a+")
-            
-            if num_batches > 0:                         #   if not full batches
-                dl_train = DataLoader(DATA_DIR, PHONEME_OUT, params['align'],
-                        params['data_type'], 'train', batch_size = params['batch_size'])
-            
-            for X_train, y_train in dl_train:
+  
+            for batch in range(0, len(X_train_batches)):
+          
+                X_train = X_train_batches[batch]
+                y_train = y_train_batches[batch]
+                
+                
                 #   theoretically, the padding token doesn't matter since its embedded version will be removed by sequence length
                 X_train_batch, X_train_seq_lens, seq_lens_idx = pad_lists(X_train, pad_token=input_dim-1)
                 X_train_batch = torch.tensor(X_train_batch).cuda()   
-                        
+            
                 if data_type == 'scalar':
                     #   sort y_train_batch
                     y_train_batch = torch.tensor([[y_train[idx]] for idx in seq_lens_idx]).float().cuda()
                 else:
-                    #   convert list[list[int]] to padded 3d tensor (seq_len, batch_size, output_dim)                
-                    y_train_batch, y_train_seq_lens, seq_lens_idx = pad_lists(y_train, pad_token=output_dim-1,
-                                                                              seq_lens_idx=seq_lens_idx)
+                    #   convert list[list[int]] to padded 3d tensor (seq_len, batch_size, output_dim)           
                     if data_type == 'binary':
+                        y_train_batch, y_train_seq_lens, seq_lens_idx = pad_lists(y_train, pad_token=2,
+                                                                              seq_lens_idx=seq_lens_idx)
                         y_train_batch = torch.tensor([y_train_batch]).cuda().float().cuda()
                         y_train_batch = y_train_batch.transpose(dim0=0, dim1=2)
                     else:
+                        y_train_batch, y_train_seq_lens, seq_lens_idx = pad_lists(y_train, pad_token=output_dim-1,
+                                                                              seq_lens_idx=seq_lens_idx)
                         y_train_batch = lists2onehottensors(y_train_batch, output_dim, onehot_encoder)
-                
+
                 #   Zero the gradient of the optimizer
                 optimizer.zero_grad()
-                
+
                 #   Forward pass
                 y_pred = clf.forward(X_train_batch, X_train_seq_lens)
                 loss = clf.compute_loss(y_pred, y_train_batch, X_train_seq_lens)
-            
+
                 sum_train_loss += loss.item()
                 sum_train_iters += 1
-            
+
                 loss.backward()     #   backward pass
                 optimizer.step()    #   update gradient step
                 
+                #   show_train function might be buggy.  Use at your own risk
+                if show_train is True and epoch % save_epoch == 0:
+                    if data_type != 'scalar':
+                        #   convert softmax y_pred and y to 1d list                        
+                        if data_type == 'binary':
+                            y_train_batch = tensors2classlist(y_train_batch, X_train_seq_lens)
+                            y_pred = tensors2classlist(y_pred, X_train_seq_lens)                    #   list of a list
+                            y_pred_int = []
+                            for lst in y_pred:
+                                y_pred_int.append([int(round(lst[i])) for i in range(0, len(lst))])    # convert floats (from sigmoid) to integers (binary)
+                            y_pred = y_pred_int
+                        else:
+                            y_train_batch = onehottensors2classlist(y_train_batch, X_train_seq_lens)
+                            y_pred = onehottensors2classlist(y_pred, X_train_seq_lens)
+                    for sample in range(0, len(y_train_batch)):
+                        y_train_sample = int2phoneme(int_to_pho_dict, y_train_batch[sample])
+                        y_pred_sample = int2phoneme(int_to_pho_dict, y_pred[sample])
+                        print("Label: ", y_train_sample)
+                        print("Predict: ", y_pred_sample)
+                    
                 batch_idx += 1
-                
-                if batch_idx >= num_batches > 0:
+                if batch_idx >= num_batches:
                     break
-            
     
             #   Average training loss
             train_loss = float(sum_train_loss) / sum_train_iters
-    
-            #   Validation Loss
-            val_loss, y_pred, X_val, y_val = evaluate(dl_val, clf, onehot_encoder, params)
             
+            if show_validation is False:
+                print("Training Loss: " + str(train_loss))
+                val_loss = -1
+            else:
+                #   Validation Loss
+                val_loss, y_pred, X_val, y_val = evaluate(dl_val, clf, onehot_encoder, params)
+                
+                #   print fixed validation case
+                y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
+                y_pred = int2phoneme(int_to_pho_dict, y_pred)
+                print(y_pred)
+        
+                    
+            if best_loss > val_loss:
+                best_checkpoint = {'model': lstm_rnn(params),
+                              'state_dict': clf.state_dict(),
+                              'optimizer': optimizer.state_dict()}
+                best_epoch = epoch
+                best_loss = val_loss
+                
             print("Training Loss: " + str(train_loss) + "    Val Loss: " + str(val_loss))
             train_file.write("Epoch: " + str(epoch) + "    Training Loss: " + str(train_loss) + 
                              "    Val Loss: " + str(val_loss) + "\n")
             train_file.close()          #   close file after writing to save
             
-            #   print fixed validation case
-            y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
-            y_pred = int2phoneme(int_to_pho_dict, y_pred)
-            #print(y_pred)
-    
             #   save progress
             if epoch % save_epoch == 0:
                 checkpoint = {'model': lstm_rnn(params),
@@ -513,13 +588,6 @@ def train(clf, onehot_encoder, params):
                               'optimizer': optimizer.state_dict()}
                 file =  SAVE_DIR + filename + "_" + str(epoch) + ".pth"
                 torch.save(checkpoint, file)
-                
-            if best_loss > val_loss:
-                best_checkpoint = {'model': lstm_rnn(params),
-                              'state_dict': clf.state_dict(),
-                              'optimizer': optimizer.state_dict()}
-                best_epoch = epoch
-                best_loss = val_loss
         
         except KeyboardInterrupt:
             print("Exiting training loop early...")
@@ -757,7 +825,7 @@ if __name__ == '__main__':
     
     #torch.manual_seed = 1
     alignment = 'hypothesis'
-    data_type = 'binary'
+    data_type = 'abridged'
 
     #   get input dim (always 44)
     dl_1 = DataLoader(DATA_DIR, PHONEME_OUT, alignment, 'full', 'val', batch_size=4)
@@ -774,17 +842,17 @@ if __name__ == '__main__':
             'hidden_dim':           100,
             'linear_dim':           40,            
             'output_dim':           output_dim,              
-            'num_lstm_layers':      20,
-            'num_linear_layers':    20,
-            'batch_size':           2,
-            'num_epochs':           200,
-            'learning_rate':        0.01,
+            'num_lstm_layers':      10,
+            'num_linear_layers':    10,
+            'batch_size':           256,
+            'num_epochs':           500,
+            'learning_rate':        0.1,
             'learning_decay':       0.0,
             'bidirectional':        False,
             'align':                alignment,
             'data_type':            data_type,
             'save_epoch':           10,
-            'num_batches':          1,                      #   set to 0 or -1 for all batches
+            'num_batches':          0,                      #   set to 0 or -1 for all batches
             'load_name':            'lstm_10.pth',
             'save_name':            'lstm_scalar',
             'best_name':            'lstm_scalar_best',
