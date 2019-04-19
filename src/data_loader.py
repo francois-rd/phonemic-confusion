@@ -43,7 +43,7 @@ class DataLoader:
         if dataset not in ['train', 'val', 'test']:
             raise ValueError(error_msg('dataset', ['train', 'val', 'test']))
         # Load phoneme2int dictionary.
-        with open(phoneme_file, 'r') as f:
+        with open(phoneme_file, 'r', encoding = 'utf8') as f:
             lines = [line.strip().split('\t')[1] for line in f]
             if alignment == 'hypothesis':
                 lines.append('{} {} {}'.format(DEL, INS_SAME, INS_DIFF))
