@@ -43,7 +43,9 @@ Revisions:
     2019-04-18       (AY)   Add show_train parameter for train() (might be buggy)
                             Add params['cross_entropy_weight'] for weighting (only works for binary right now)
                             Change file saving methods
-                            Change evaluate to output all samples (list of list of list) 
+                            Change evaluate() to output all samples (list of list of list) 
+                            Fixed evaluate() for binary (see show_train)
+                            Add in confusion matrix (only works for binary)
                             
 
 Helpful Links:
@@ -417,7 +419,7 @@ def pad_lists(lists, pad_token, seq_lens_idx=[]):
     return ordered_lists, ordered_seq_lens, seq_lens_idx
 
 
-def train(clf, onehot_encoder, params, show_validation=False, show_train=False):
+def train(clf, onehot_encoder, params, show_validation=True, show_train=False):
     """
     Trains the model given training data.
     Arguments:
@@ -570,25 +572,37 @@ def train(clf, onehot_encoder, params, show_validation=False, show_train=False):
             #   Average training loss
             train_loss = float(sum_train_loss) / sum_train_iters
             
+            tn = -1
+            fp = -1
+            fn = -1
+            tp = -1
+            accuracy = -1
+            
             if show_validation is False:
                 print("Training Loss: " + str(train_loss))
                 val_loss = -1
             else:
                 #   Validation Loss
                 val_loss, y_pred_list, X_val_list, y_val_list = evaluate(dl_val, clf, onehot_encoder, params)
-                print(len(y_val_list[3][3]))
-                print(len(y_val_list[3][3]))
-                print(len(y_pred_list[3][3]))
+
+                #   flatten list3d to list2d
+                y_val = [sample for batch in y_val_list for sample in batch]
+                y_pred = [sample for batch in y_pred_list for sample in batch]
                 
+                if data_type == 'binary':
+                    #   flatten list2d to list1d
+                    y_val_steps = [step for sample in y_val for step in sample]
+                    y_pred_steps = [step for sample in y_pred for step in sample]
+                    # confusion matrix
+                    tn, fp, fn, tp = confusion_matrix(y_val_steps, y_pred_steps).ravel()
+                    accuracy = (tn + tp) / (tn + fp + fn + tp)
                 
-                #   confusion matrix
-                #   convert y_pred_list, y_val_list to 2 large lists and input into confusion_matrix
-                
+            
                 #   print fixed validation case
                 y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
                 y_pred = int2phoneme(int_to_pho_dict, y_pred)
                 print(y_pred)
-        
+                
                     
             if best_loss > val_loss:
                 best_checkpoint = {'model': lstm_rnn(params),
@@ -599,7 +613,9 @@ def train(clf, onehot_encoder, params, show_validation=False, show_train=False):
                 
             print("Training Loss: " + str(train_loss) + "    Val Loss: " + str(val_loss))
             train_file.write("Epoch: " + str(epoch) + "    Training Loss: " + str(train_loss) + 
-                             "    Val Loss: " + str(val_loss) + "\n")
+                             "    Val Loss: " + str(val_loss) + "   TN: " + str(tn) + "    TP: " + str(tp)
+                             + "     FP: " + str(fp) + "    FN: " + str(fn) + "    Accuracy: " + str(accuracy) + 
+                             "\n")
             train_file.close()          #   close file after writing to save
             
             #   save progress
@@ -661,11 +677,19 @@ def evaluate(dataloader, clf, onehot_encoder, params):
         sum_loss += loss.item()
         num_iters += 1
         
-        if data_type != 'scalar':
         
-            #   convert softmax y_pred and y to 1d list
-            y_test_batch = onehottensors2classlist(y_test_batch, X_test_seq_lens)
-            y_pred = onehottensors2classlist(y_pred, X_test_seq_lens)
+        if data_type != 'scalar':
+            if data_type == 'binary':
+                y_test_batch = tensors2classlist(y_test_batch, X_test_seq_lens)
+                y_pred = tensors2classlist(y_pred, X_test_seq_lens)
+                y_pred_int = []
+                for lst in y_pred:
+                    y_pred_int.append([int(round(lst[i])) for i in range(0, len(lst))])    # convert floats (from sigmoid) to integers (binary)
+                y_pred = y_pred_int
+            else:
+                #   convert softmax y_pred and y to 1d list
+                y_test_batch = onehottensors2classlist(y_test_batch, X_test_seq_lens)
+                y_pred = onehottensors2classlist(y_pred, X_test_seq_lens)
     
         X_test_list.append(X_test_batch)
         y_test_list.append(y_test_batch)
@@ -845,18 +869,35 @@ def main(params, load_model=False, train_model=True, verbose=False):
                     params['data_type'], 'test', batch_size = params['batch_size'])
     int_to_pho_dict = dl_test.int_to_phoneme
     
+    
     #   Test Loss
     loss, y_pred_list, X_test_list, y_test_list = evaluate(dl_test, clf, onehot_encoder, params)
     
     #   flatten list3d to list2d
     y_test = [sample for batch in y_test_list for sample in batch]
     y_pred = [sample for batch in y_pred_list for sample in batch]
+
+
+    tn = -1
+    fp = -1
+    fn = -1
+    tp = -1
+    accuracy = -1
+
+    if data_type == 'binary':
+        #   flatten list2d to list1d
+        y_test_steps = [step for sample in y_test for step in sample]
+        y_pred_steps = [step for sample in y_pred for step in sample]
+    
+        # confusion matrix
+        tn, fp, fn, tp = confusion_matrix(y_test_steps, y_pred_steps).ravel()
+        accuracy = (tn + tp) / (tn + fp + fn + tp)  
+    
     #   Test Report
     test_file = open(save_dir + params['test_report'] + "_" + str(dt.datetime.now()) + ".txt", "w")
     
     if data_type == 'scalar':
         for sample in range(0, len(y_test)):
-            print("Label: ", float(y_test[sample]), "    Predict: ", float(y_pred[sample]))
             test_file.write("Label: " + str(float(y_test[sample])) + "    Predict: " +
                             str(float(y_pred[sample])))
         print("Loss: " + str(loss))
@@ -865,13 +906,16 @@ def main(params, load_model=False, train_model=True, verbose=False):
         for sample in range(0, len(y_test)):
             y_test_sample = int2phoneme(int_to_pho_dict, y_test[sample])
             y_pred_sample = int2phoneme(int_to_pho_dict, y_pred[sample])
-            print("Label: ", y_test_sample)
-            print("Predict: ", y_pred_sample)
             test_file.write("Label: " + str(y_test_sample) + "\n")
             test_file.write("Predict: " +  str(y_pred_sample) + "\n")
-        print("Loss: ", str(loss))
+        
     
-    test_file.write("Loss: " + str(loss))
+    
+    result_string = "Loss: " + str(loss) + "   TN: " + str(tn) + "    TP: " + str(tp) + \
+              "     FP: " + str(fp) + "    FN: " + str(fn) + "    Accuracy: " + str(accuracy) + "\n"
+
+    print(result_string)
+    test_file.write(result_string)
     test_file.close()
     
 if __name__ == '__main__':
