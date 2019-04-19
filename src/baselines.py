@@ -1,14 +1,3 @@
-# Load hyp_full (direct, not from data loader).
-# Take N as param.
-# Preprend each ref by n-1 "SOS".
-# for i in range(n, len(ref)):
-#  counts using i and n-1 values before i
-#  numerator count is a subset of the denom count
-#  find a way to count efficiently
-#
-# Notes:
-# - No smoothing for this baseline
-# - Set N in {1, 2, 3, median num phonemes/word} and see which is best.
 from src.align_phonemes import ALIGNMENT_OPTS, OUTPUT_OPTS, PHONEME_OUT
 from sklearn.metrics import accuracy_score, precision_recall_curve, auc
 from sklearn.metrics import confusion_matrix, roc_curve, roc_auc_score
@@ -152,7 +141,6 @@ def _predict_mle_model(mle, refs, n):
                 value_dict = mle[tuple(ref[i - n_minus_1:i + 1])]
                 hyp.append(max(value_dict.keys(), key=lambda k: value_dict[k]))
             except KeyError:
-                # TODO: histogram of which n-grams causes these key errors.
                 hyp.append(-1)
                 count += 1
             try:
