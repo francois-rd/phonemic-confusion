@@ -40,7 +40,11 @@ Revisions:
                             Add learning decay to Adam
                             Add show_validation parameter for train() (does not work with small batch_size for some reason)
                             Modify the training loop to load all training batches before beginning
-                            Add show_train parameter for train() (might be buggy)
+    2019-04-18       (AY)   Add show_train parameter for train() (might be buggy)
+                            Add params['cross_entropy_weight'] for weighting (only works for binary right now)
+                            Change file saving methods
+                            Change evaluate to output all samples (list of list of list) 
+                            
 
 Helpful Links:
     PyTorch LSTM outputs : https://stackoverflow.com/questions/48302810/whats-the-difference-between-hidden-and-output-in-pytorch-lstm
@@ -63,6 +67,7 @@ from src.data_loader import DataLoader
 from sklearn.preprocessing import OneHotEncoder
 import datetime as dt
 from src.utils import int2phoneme
+from sklearn.metrics import confusion_matrix
 
 #   hide warnings
 if not sys.warnoptions:
@@ -72,7 +77,8 @@ if not sys.warnoptions:
 
 DATA_DIR = "./data/transcripts/"
 PHONEME_OUT = "./data/phonemes.txt"
-SAVE_DIR = "./output/NN/LSTM/"
+
+
 
 class lstm_rnn(nn.Module):
     
@@ -89,7 +95,7 @@ class lstm_rnn(nn.Module):
         self.bidirectional = params['bidirectional']
         self.batch_size = params['batch_size']
         self.data_type = params['data_type']
-        
+        self.loss_weight = params['cross_entropy_weight']
         self.hidden_states = self.init_hidden_states(self.bidirectional).cuda()
         self.cell_state = self.init_cell_state(self.bidirectional).cuda()
         
@@ -229,6 +235,8 @@ class lstm_rnn(nn.Module):
         Returns:
             loss (torch.tensor) : MSE loss of y (self.scalar=True)
         """
+        
+        
         if self.data_type == 'scalar':          
             return F.mse_loss(y, target)
         
@@ -242,6 +250,8 @@ class lstm_rnn(nn.Module):
                 
                 return torch.tensor([-1])       #   causes an error :D
             
+            
+            
             for idx in range(0, y.shape[1]):         #   for every sample in batch
                 #   remove padding and flatten to 1D                
                 y_tensor1D = y[:seq_lens[idx], idx, :].flatten()
@@ -254,10 +264,13 @@ class lstm_rnn(nn.Module):
                 else:
                     y_flatten = torch.cat((y_flatten, y_tensor1D))
                     target_flatten = torch.cat((target_flatten, target_tensor1D))
-#            if data_type == 'binary':
+#            if self.data_type == 'binary':
 #                return F.mse_loss(y_flatten, target_flatten)
 #            else:
-            return F.binary_cross_entropy(y_flatten, target_flatten)
+            if self.data_type == 'binary':
+                weights = torch.where(target_flatten == 1, torch.tensor(self.loss_weight, dtype=torch.float).cuda(), torch.tensor(1, dtype=torch.float).cuda())
+                
+            return F.binary_cross_entropy(y_flatten, target_flatten, weight=weights)
 
 
     def tensors2packedseq(self, tensors, seq_lens, pad_token=0):
@@ -404,7 +417,7 @@ def pad_lists(lists, pad_token, seq_lens_idx=[]):
     return ordered_lists, ordered_seq_lens, seq_lens_idx
 
 
-def train(clf, onehot_encoder, params, show_validation=True, show_train=False):
+def train(clf, onehot_encoder, params, show_validation=False, show_train=False):
     """
     Trains the model given training data.
     Arguments:
@@ -423,9 +436,10 @@ def train(clf, onehot_encoder, params, show_validation=True, show_train=False):
     filename = params['save_name']
     bestname = params['best_name']
     save_epoch = params['save_epoch']
+    save_dir = params['save_dir']
     
     #   name report file for writing
-    train_filename = SAVE_DIR + str(dt.datetime.now()) + "_" + params['train_report']
+    train_filename = save_dir + params['train_report'] + "_" + str(dt.datetime.now()) + ".txt"
     
     #   Create training data DataLoader
     dl_full = DataLoader(DATA_DIR, PHONEME_OUT, params['align'], 'full', 'val',
@@ -441,8 +455,8 @@ def train(clf, onehot_encoder, params, show_validation=True, show_train=False):
     
     #   consistent validation case
     X_fixed_batch, y_fixed_batch = dl_val.__iter__().__next__()                 #   gets a single batch
-    X_fixed = X_fixed_batch[0]
-    y_fixed = y_fixed_batch[0]
+    X_fixed = X_fixed_batch[2]
+    y_fixed = y_fixed_batch[2]
     
     
     X_fixed_phoneme = int2phoneme(full_dict, X_fixed)
@@ -561,7 +575,14 @@ def train(clf, onehot_encoder, params, show_validation=True, show_train=False):
                 val_loss = -1
             else:
                 #   Validation Loss
-                val_loss, y_pred, X_val, y_val = evaluate(dl_val, clf, onehot_encoder, params)
+                val_loss, y_pred_list, X_val_list, y_val_list = evaluate(dl_val, clf, onehot_encoder, params)
+                print(len(y_val_list[3][3]))
+                print(len(y_val_list[3][3]))
+                print(len(y_pred_list[3][3]))
+                
+                
+                #   confusion matrix
+                #   convert y_pred_list, y_val_list to 2 large lists and input into confusion_matrix
                 
                 #   print fixed validation case
                 y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
@@ -586,19 +607,19 @@ def train(clf, onehot_encoder, params, show_validation=True, show_train=False):
                 checkpoint = {'model': lstm_rnn(params),
                               'state_dict': clf.state_dict(),
                               'optimizer': optimizer.state_dict()}
-                file =  SAVE_DIR + filename + "_" + str(epoch) + ".pth"
+                file =  save_dir + filename + "_" + str(epoch) + "_" + str(round(train_loss,4)) + ".pth"
                 torch.save(checkpoint, file)
         
         except KeyboardInterrupt:
             print("Exiting training loop early...")
             #   save best checkpoint
-            file =  SAVE_DIR + bestname + "_" + str(best_epoch) + ".pth"
+            file =  save_dir + bestname + "_" + str(best_epoch) + ".pth"
             torch.save(best_checkpoint, file)
             print("Best Val Loss at Epoch " + str(best_epoch) + ": " + str(best_loss))
             break
     
     #   save best checkpoint
-    file =  SAVE_DIR + bestname + "_" + str(best_epoch) + ".pth"
+    file =  save_dir + bestname + "_" + str(best_epoch) + ".pth"
     torch.save(best_checkpoint, file)
     print("Best Val Loss at Epoch " + str(best_epoch) + ": " + str(best_loss))
         
@@ -612,6 +633,10 @@ def evaluate(dataloader, clf, onehot_encoder, params):
     
     sum_loss = 0
     num_iters = 0
+    
+    X_test_list = []
+    y_test_list = []
+    y_pred_list = []
     
     for X_test, y_test in dataloader:
     
@@ -637,13 +662,18 @@ def evaluate(dataloader, clf, onehot_encoder, params):
         num_iters += 1
         
         if data_type != 'scalar':
+        
             #   convert softmax y_pred and y to 1d list
             y_test_batch = onehottensors2classlist(y_test_batch, X_test_seq_lens)
             y_pred = onehottensors2classlist(y_pred, X_test_seq_lens)
     
+        X_test_list.append(X_test_batch)
+        y_test_list.append(y_test_batch)
+        y_pred_list.append(y_pred)
+    
     loss = sum_loss / num_iters
     
-    return loss, y_pred, X_test_batch, y_test_batch
+    return loss, y_pred_list, X_test_list, y_test_list
 
 def predict(X, y, clf, onehot_encoder, params):
     """
@@ -744,27 +774,45 @@ def create_sample_data(params, min_seq_len=3, max_seq_len=10, scalar=True, shuff
 
     return X, y
 
-def load_checkpoint(filename):
+def load_checkpoint(filename, load_dir):
     """
     Loads a saved model
     Arugments:
-        filename (str) : name of file in SAVE_DIR
+        filename (str) : name of file in load_dir
     Returns
         model : saved model in filename
     """
-    checkpoint = torch.load(SAVE_DIR + filename)
+    checkpoint = torch.load(load_dir + filename)
     model = checkpoint['model']
     model.load_state_dict(checkpoint['state_dict'])
     #for parameter in model.parameters():
     #    parameter.requires_grad = False
     #model.eval()
     return model
+
+def print_dictionary(filename, dictionary, save_dir):
+    """
+    Print the contents of dictionary to filename
+    """
+    file = open(save_dir + filename + "_" + str(dt.datetime.now()) + ".txt", "w")
     
+    print("Saving parameters to file...")
+    
+    for key in dictionary:
+        file.write(key + " : " + str(dictionary[key]) + "\n")
+    
+    file.close()
+
 
 def main(params, load_model=False, train_model=True, verbose=False):
 
     data_type = params['data_type']
     output_dim = params['output_dim']
+    save_dir = params['save_dir']
+    
+    os.mkdir(save_dir)
+    
+    print_dictionary("params", params, params['save_dir'])
     
     #   initialize classifier
     if verbose:
@@ -779,7 +827,7 @@ def main(params, load_model=False, train_model=True, verbose=False):
     #   Create model
     if load_model is True:
         print("Loading model...")
-        clf = load_checkpoint(params['load_name']).cuda()
+        clf = load_checkpoint(params['load_name'], load_dir).cuda()
     else:
         print("Initializing model...")
         clf = lstm_rnn(params).cuda()
@@ -795,13 +843,16 @@ def main(params, load_model=False, train_model=True, verbose=False):
     
     dl_test = DataLoader(DATA_DIR, PHONEME_OUT, params['align'],
                     params['data_type'], 'test', batch_size = params['batch_size'])
+    int_to_pho_dict = dl_test.int_to_phoneme
     
     #   Test Loss
-    loss, y_pred, X_test, y_test = evaluate(dl_test, clf, onehot_encoder, params)
+    loss, y_pred_list, X_test_list, y_test_list = evaluate(dl_test, clf, onehot_encoder, params)
     
+    #   flatten list3d to list2d
+    y_test = [sample for batch in y_test_list for sample in batch]
+    y_pred = [sample for batch in y_pred_list for sample in batch]
     #   Test Report
-    test_file = open(SAVE_DIR + str(dt.datetime.now()) + "_" 
-                          + params['test_report'], "w")
+    test_file = open(save_dir + params['test_report'] + "_" + str(dt.datetime.now()) + ".txt", "w")
     
     if data_type == 'scalar':
         for sample in range(0, len(y_test)):
@@ -812,10 +863,12 @@ def main(params, load_model=False, train_model=True, verbose=False):
         
     else:
         for sample in range(0, len(y_test)):
-            print("Label: ", y_test[sample])
-            print("Predict: ", y_pred[sample])
-            test_file.write("Label: " + str(y_test[sample]))
-            test_file.write("Predict: " +  str(y_pred[sample]))
+            y_test_sample = int2phoneme(int_to_pho_dict, y_test[sample])
+            y_pred_sample = int2phoneme(int_to_pho_dict, y_pred[sample])
+            print("Label: ", y_test_sample)
+            print("Predict: ", y_pred_sample)
+            test_file.write("Label: " + str(y_test_sample) + "\n")
+            test_file.write("Predict: " +  str(y_pred_sample) + "\n")
         print("Loss: ", str(loss))
     
     test_file.write("Loss: " + str(loss))
@@ -825,7 +878,7 @@ if __name__ == '__main__':
     
     #torch.manual_seed = 1
     alignment = 'hypothesis'
-    data_type = 'abridged'
+    data_type = 'binary'
 
     #   get input dim (always 44)
     dl_1 = DataLoader(DATA_DIR, PHONEME_OUT, alignment, 'full', 'val', batch_size=4)
@@ -837,27 +890,30 @@ if __name__ == '__main__':
     output_dim = dl_2.vocab_size
     
     params = {
-            'input_dim':            input_dim,
-            'embed_dim':            input_dim,
-            'hidden_dim':           100,
-            'linear_dim':           40,            
-            'output_dim':           output_dim,              
-            'num_lstm_layers':      10,
-            'num_linear_layers':    10,
-            'batch_size':           256,
-            'num_epochs':           500,
-            'learning_rate':        0.1,
-            'learning_decay':       0.0,
-            'bidirectional':        False,
-            'align':                alignment,
-            'data_type':            data_type,
-            'save_epoch':           10,
-            'num_batches':          0,                      #   set to 0 or -1 for all batches
-            'load_name':            'lstm_10.pth',
-            'save_name':            'lstm_scalar',
-            'best_name':            'lstm_scalar_best',
-            'train_report':         'lstm_scalar_report.txt',
-            'test_report':          'lstm_scalar_test.txt'
+            'input_dim':                input_dim,
+            'embed_dim':                input_dim,
+            'hidden_dim':               100,
+            'linear_dim':               40,            
+            'output_dim':               output_dim,              
+            'num_lstm_layers':          10,
+            'num_linear_layers':        10,
+            'batch_size':               256,
+            'num_epochs':               500,
+            'learning_rate':            0.1,
+            'learning_decay':           0,
+            'cross_entropy_weight':     10,
+            'bidirectional':            False,
+            'align':                    alignment,
+            'data_type':                data_type,
+            'save_epoch':               10,
+            'num_batches':              0,                      #   set to 0 or -1 for all batches
+            'load_name':                'lstm_10.pth',
+            'save_name':                'lstm_binary_model',
+            'best_name':                'lstm_binary_best',
+            'train_report':             'lstm_binary_train',
+            'test_report':              'lstm_binary_test',
+            'save_dir':                 "./output/NN/LSTM/" + str(dt.datetime.now()) + "/",
+            'load_dir':                 "NONE"
     }
 
     main(params, load_model=False, train_model=True, verbose=True)
