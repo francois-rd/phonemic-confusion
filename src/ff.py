@@ -52,7 +52,7 @@ class FFNN(nn.Module):
 		Saves model to a file.
 		
 		:param path: path to file where to save model
-		""" 
+		"""
 		settings = {'model': FFNN(self.forward_context, self.backward_context, self.embed_dim, 
 			self.phoneme_count, self.error_weight), 'state_dict': self.state_dict()}
 		torch.save(settings, path)
