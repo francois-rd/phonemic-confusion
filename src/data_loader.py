@@ -49,6 +49,7 @@ class DataLoader:
                 lines.append('{} {} {}'.format(DEL, INS_SAME, INS_DIFF))
             phonemes = sorted(set([p for line in lines for p in line.split()]))
         phoneme_to_int = {p: i for i, p in enumerate(phonemes)}
+        self.phoneme_to_int = phoneme_to_int
         # Create the int2phoneme dictionary.
         if output == 'binary':
             self.int_to_phoneme = {0: 'match', 1: 'not_match'}
