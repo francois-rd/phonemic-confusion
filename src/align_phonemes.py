@@ -20,7 +20,7 @@ def load_data(data_dir, files):
     """
     refs, hyps = [], []
     for file in files:
-        with open(data_dir + file + '.txt', 'r') as f:
+        with open(data_dir + file + '.txt', 'r', encoding = 'utf8') as f:
             lines = [line.strip().split('\t') for line in f]
             hyps.extend([line[4].split('|')[0] for line in lines])
             refs.extend([line[-1] for line in lines])
@@ -38,7 +38,7 @@ def load_phonemes(file):
     :param file: the file containing the phoneme dictionary
     :return: the phoneme dictionary
     """
-    with open(file, 'r') as f:
+    with open(file, 'r', encoding = 'utf8') as f:
         lines = [line.strip().split('\t')[:2] for line in f]
     return {line[0].lower(): line[1] for line in lines}
 
