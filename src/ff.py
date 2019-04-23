@@ -6,7 +6,8 @@ import torch.nn.functional as F
 import torch.utils.data
 import numpy as np
 import more_itertools
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix, roc_curve
+from matplotlib import pyplot
 
 class FFNN(nn.Module):
 	"""
@@ -87,16 +88,57 @@ def data_transformer(data, forward_context, backward_context, vocab_size):
 	x, y = data
 	
 	inputs = []
+	full_phrases = []
 	for phrase in x:
 		padded_phrase = [START_TOKEN] * start_padding + phrase + [END_TOKEN] * end_padding
-		inputs.extend(list(more_itertools.windowed(padded_phrase, n = 1 + start_padding + end_padding)))
+		new_sub_phrases = list(more_itertools.windowed(padded_phrase, n = 1 + start_padding + end_padding))
+		inputs.extend(new_sub_phrases)
+		full_phrases.extend([phrase] * len(new_sub_phrases))
 	
 	inputs = torch.tensor(inputs, dtype = torch.int64)
 	targets = torch.tensor(np.concatenate(y), dtype = torch.float).reshape(-1, 1)
 
-	return inputs, targets
+	return inputs, targets, full_phrases
 
-def evaluate_model(model, validation_data, forward_context, backward_context, vocab_size, error_weight):
+def phonemes_to_phrase(show_transcription = True):
+	"""
+	Returns a dictionary that converts a list of phonemes into the English phrase that created it 
+	
+	:param show_transcription: Whether ground truth phrases or both ground truth phrases and transcription should be shown
+	"""
+
+	from align_phonemes import load_data, load_phonemes, text2phonemes
+	from src.phonemes import DATA_DIR, FILES, PHONEME_OUT
+
+	true_phrases, transcribed_phrases = load_data(DATA_DIR, FILES)
+	phoneme_dictionary = load_phonemes(PHONEME_OUT)
+	
+	if show_transcription:
+		phoneme2phrase = {text2phonemes(true_phrases[i], phoneme_dictionary) : (true_phrases[i], transcribed_phrases[i]) for i in range(len(true_phrases))}
+	else:
+		phoneme2phrase = {text2phonemes(phrase, phoneme_dictionary) : phrase for phrase in true_phrases}
+
+	return phoneme2phrase
+
+def ROC(y_target, y_probability, path):
+	"""
+	Returns data to plot ROC curve
+
+	:params y_target: The true label
+	:params y_probability: The predicted probability
+	:params path: Where to save the text file with ROC curve data
+	"""
+	fpr, tpr, thresholds = roc_curve(y_true = y_target, y_score = y_probability)
+
+	with open(path, 'w') as f:
+		f.write('FPR,TPR,THRESHOLDS')
+		for i in range(1, len(fpr), 500): # Ignoring first row due to arbitrary calculation, skipping rows for small file
+			f.write('\n' + str(fpr[i]) + ',' + str(tpr[i]) + ',' + str(thresholds[i]))
+
+	return fpr, tpr, thresholds
+
+def evaluate_model(model, validation_data, forward_context, backward_context, vocab_size, 
+	error_weight, show_transcription, roc = None, decoder = None, phrase_count = 0):
 	"""
 	Helper function to evaluate trained model on validation (or test) data
 
@@ -106,16 +148,69 @@ def evaluate_model(model, validation_data, forward_context, backward_context, vo
 	:param backward_context: Number of phonemes before (context)
 	:param vocab_size: Number of token types
 	:param error_weight: Multiplier for the penalty for not identifying errors correctly vs. identifying non-errors correctly
+	:param show_transcription: Whether ground truth phrases or both ground truth phrases and transcription should be shown
+	:param roc: Whether to write ROC curve information to a file (provide path if so)
+	:param decoder: Dictionary with integers as keys and phonemes as values; must be provided if phrases = True
+	:param phrases: Number of maximum and minimum predicted error phrases to print
 	"""
 
 	val_targets = torch.tensor([])
 	val_predictions = torch.tensor([])
-	
+	val_inputs = torch.tensor([], dtype = torch.int64)
+	val_full_phrases = []
+
 	for minibatch in validation_data:
-		new_inputs, new_targets = data_transformer(minibatch, forward_context, backward_context, vocab_size)
+		new_inputs, new_targets, new_full_phrases = data_transformer(minibatch, forward_context, backward_context, vocab_size)
 		new_predictions = model(new_inputs)
 		val_targets = torch.cat((val_targets, new_targets))
 		val_predictions = torch.cat((val_predictions, new_predictions))
+		val_inputs = torch.cat((val_inputs, new_inputs))
+		val_full_phrases.extend(new_full_phrases)
+
+	if phrase_count > 0 and decoder:
+		sort_ids = np.argsort(val_predictions.detach().numpy().ravel())
+		phoneme2phrase = phonemes_to_phrase(show_transcription)
+
+		print('######################################################################')
+		print('Top', str(phrase_count), 'Predicted Least Confusing Phrases')
+		print('Predicted Confusion:')
+		print(val_predictions.detach().numpy()[sort_ids[:phrase_count]])
+		
+		print('Phrases:')
+		phrases = val_inputs.detach().numpy()[sort_ids[:phrase_count]]
+		print(phrases)
+		
+		print('Translated Phrases:')
+		print(np.vectorize(decoder.get)(phrases))
+
+		print('English Phrases (True, Transcribed):')
+		phoneme_list = [[decoder[integer] for integer in val_full_phrases[phrase]] for phrase in sort_ids[:phrase_count]]
+		print([phoneme2phrase[' '.join(phonemes)] for phonemes in phoneme_list])
+		
+		print('Actual Confusion?')
+		print(val_targets.detach().numpy()[sort_ids[:phrase_count]])
+
+		print('######################################################################')
+		print('Top', str(phrase_count), 'Predicted Most Confusing Phrases')
+		print('Predicted Confusion:')
+		print(np.flip(val_predictions.detach().numpy()[sort_ids[-phrase_count:]], axis = 0))
+		
+		print('Phrases:')
+		phrases = np.flip(val_inputs.detach().numpy()[sort_ids[-phrase_count:]], axis = 0)
+		print(phrases)
+		
+		print('Translated Phrases:')
+		print(np.vectorize(decoder.get)(phrases))		
+		
+		print('English Phrases (True, Transcribed):')
+		phoneme_list = np.flip([[decoder[integer] for integer in val_full_phrases[phrase]] for phrase in sort_ids[-phrase_count:]], axis = 0)
+		print([phoneme2phrase[' '.join(phonemes)] for phonemes in phoneme_list])
+
+		print('Actual Confusion?')
+		print(np.flip(val_targets.detach().numpy()[sort_ids[-phrase_count:]], axis = 0))
+
+	if roc:
+		ROC(val_targets.detach().numpy(), val_predictions.detach().numpy(), roc)
 
 	val_weights = torch.where(val_targets == 1, torch.tensor(error_weight, dtype = torch.float), torch.tensor(1, dtype = torch.float))
 	validation_loss = float(F.binary_cross_entropy(val_predictions, val_targets, weight = val_weights, reduction = 'sum').detach()) / len(val_predictions)
@@ -180,7 +275,7 @@ def train(model_parameters):
 		for minibatch in training_data:
 			opt.zero_grad()
 
-			inputs, targets = data_transformer(minibatch, forward_context, backward_context, vocab_size)
+			inputs, targets, _ = data_transformer(minibatch, forward_context, backward_context, vocab_size)
 			predictions = model(inputs)
 			weights = torch.where(targets == 1, torch.tensor(error_weight, dtype = torch.float), torch.tensor(1, dtype = torch.float))
 			loss = F.binary_cross_entropy(predictions, targets, weight = weights, reduction = 'sum')
@@ -216,7 +311,7 @@ def investigate_model(model_parameters, file):
 	Given a trained model name, outputs its performance on validation (test) data
 
 	:param model_parameters: dictionary with model parameters:
-		Uses data directory, phoneme file, weights_path, batch size, and loss_multiplier
+		Uses data directory, phoneme file, weights_path, batch size, loss_multiplier, and ROC location (where to write file)
 	:param file: file path where model is saved
 	"""
 	DATA_DIR = model_parameters['data_dir']
@@ -224,18 +319,53 @@ def investigate_model(model_parameters, file):
 	batch_size = model_parameters['batch_size']
 	loss_multiplier = model_parameters['loss_multiplier']
 	weights_path = model_parameters['weights_path']
+	roc = model_parameters['roc_location']
 
 	print('Hold on. Fetching results!')
 
-	validation_data = DataLoader(DATA_DIR, PHONEME_OUT, 'hypothesis', 'binary', 'val', batch_size = batch_size)
+	validation_data = DataLoader(DATA_DIR, PHONEME_OUT, 'hypothesis', 'binary', 'test', batch_size = batch_size)
+	int_to_phoneme = dict((v,k) for k,v in validation_data.phoneme_to_int.items())
 
 	model = FFNN.load(weights_path + file)
 	validation_loss, tn, fp, fn, tp = evaluate_model(model, validation_data, model.forward_context, 
-		model.backward_context, model.phoneme_count, model.error_weight)
+		model.backward_context, model.phoneme_count, model.error_weight, roc = roc, show_transcription = True, decoder = int_to_phoneme, phrase_count = 5)
 
 	print('######################################################################', '\nValidation Loss:', validation_loss * loss_multiplier)
 	print('TN:', tn, '| FP:', fp, '| FN:', fn, '| TP:', tp, '| Accuracy:', (tn + fn) / (tn + fp + fn + tp))
 
+def investigate_data(model_parameters, path):
+	"""
+	Returns number of phonemes correctly and incorrectly transcribed in dataset, by phoneme
+
+	:param model_parameters: dictionary with model parameters:
+		Uses data directory, phoneme file, batch size
+	:param path: file where phoneme data saved
+	"""
+	from collections import Counter
+
+	DATA_DIR = model_parameters['data_dir']
+	PHONEME_OUT = model_parameters['phoneme_out']
+	batch_size = model_parameters['batch_size']
+
+	train_data = DataLoader(DATA_DIR, PHONEME_OUT, 'hypothesis', 'binary', 'train', batch_size = batch_size)
+	int_to_phoneme = dict((v,k) for k,v in train_data.phoneme_to_int.items())
+
+	cnt_correct = Counter()
+	cnt_incorrect = Counter()
+
+	for x, y in train_data:
+		x = [phoneme for phrase in x for phoneme in phrase]
+		y = [label for phrase in y for label in phrase]
+		for i in range(len(x)):
+			if y[i]:
+				cnt_incorrect[int_to_phoneme[x[i]]] += 1
+			else:
+				cnt_correct[int_to_phoneme[x[i]]] += 1
+	
+	with open(path, 'w') as f:
+		f.write('PHONEME,CORRECT,INCORRECT')
+		for key, value in cnt_correct.items():
+			f.write('\n' + str(key) + ',' + str(value) + ',' + str(cnt_incorrect[key]))
 
 torch.manual_seed = 1
 model_parameters = {
@@ -248,10 +378,12 @@ model_parameters = {
 	'weights_path':		'C:/Users/Ilan/Desktop/MSc Statistics/Neural Networks/Final Project Code/models/',
 	'data_dir':			'C:/Users/Ilan/Desktop/MSc Statistics/Neural Networks/Final Project Code/data/transcripts/',
 	'phoneme_out':		'C:/Users/Ilan/Desktop/MSc Statistics/Neural Networks/Final Project Code/data/phonemes.txt',
+	'roc_location':		'C:/Users/Ilan/Desktop/MSc Statistics/Neural Networks/Final Project Code/diagrams/roc.csv',
 	'print_batch':		100,
 	'loss_multiplier':	10**3,
 	'save_epoch':		1
 }
 
-train(model_parameters)
-#investigate_model(model_parameters, file = 'epoch_2_1206.231.weights')
+#train(model_parameters)
+#investigate_model(model_parameters, file = 'epoch_7_1135.176.weights')
+investigate_data(model_parameters, 'C:/Users/Ilan/Desktop/MSc Statistics/Neural Networks/Final Project Code/diagrams/phoneme_frequency.csv')
