@@ -47,6 +47,7 @@ Revisions:
                             Fixed evaluate() for binary (see show_train)
                             Add in confusion matrix (only works for binary)
                             Fix predict for binary
+    2019-04-24       (AY)   Add in ROC() code (from ff.py - Ilan Kogan) and modify existing code to work with ROC()
                             
 
 Helpful Links:
@@ -70,7 +71,7 @@ from src.data_loader import DataLoader
 from sklearn.preprocessing import OneHotEncoder
 import datetime as dt
 from src.utils import int2phoneme
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix, roc_curve
 
 #   hide warnings
 if not sys.warnoptions:
@@ -586,11 +587,11 @@ def train(clf, onehot_encoder, params, show_validation=True, show_train=False):
                 val_loss = -1
             else:
                 #   Validation Loss
-                val_loss, y_pred_list, X_val_list, y_val_list = evaluate(dl_val, clf, onehot_encoder, params)
+                val_loss, y_pred_int_list, y_pred_prob_list, X_val_list, y_val_list = evaluate(dl_val, clf, onehot_encoder, params)
 
                 #   flatten list3d to list2d
                 y_val = [sample for batch in y_val_list for sample in batch]
-                y_pred = [sample for batch in y_pred_list for sample in batch]
+                y_pred = [sample for batch in y_pred_int_list for sample in batch]
                 
                 if data_type == 'binary':
                     #   flatten list2d to list1d
@@ -655,7 +656,8 @@ def evaluate(dataloader, clf, onehot_encoder, params):
     
     X_test_list = []
     y_test_list = []
-    y_pred_list = []
+    y_pred_int_list = []
+    y_pred_prob_list = []
     
     for X_test, y_test in dataloader:
     
@@ -686,21 +688,24 @@ def evaluate(dataloader, clf, onehot_encoder, params):
                 y_test_batch = tensors2classlist(y_test_batch, X_test_seq_lens)
                 y_pred = tensors2classlist(y_pred, X_test_seq_lens)
                 y_pred_int = []
+                y_pred_prob = []
                 for lst in y_pred:
                     y_pred_int.append([int(round(lst[i])) for i in range(0, len(lst))])    # convert floats (from sigmoid) to integers (binary)
-                y_pred = y_pred_int
+                    y_pred_prob.append([lst[i] for i in range(0, len(lst))])
             else:
                 #   convert softmax y_pred and y to 1d list
                 y_test_batch = onehottensors2classlist(y_test_batch, X_test_seq_lens)
-                y_pred = onehottensors2classlist(y_pred, X_test_seq_lens)
+                y_pred_int = onehottensors2classlist(y_pred, X_test_seq_lens)
+                y_pred_prob = []                #   nothing
     
         X_test_list.append(X_test_batch)
         y_test_list.append(y_test_batch)
-        y_pred_list.append(y_pred)
+        y_pred_int_list.append(y_pred_int)
+        y_pred_prob_list.append(y_pred_prob)
     
     loss = sum_loss / num_iters
     
-    return loss, y_pred_list, X_test_list, y_test_list
+    return loss, y_pred_int_list, y_pred_prob_list, X_test_list, y_test_list
 
 def predict(X, y, clf, onehot_encoder, params):
     """
@@ -837,6 +842,23 @@ def print_dictionary(filename, dictionary, save_dir):
     
     file.close()
 
+def ROC(y_target, y_probability, path):
+	"""
+    ----Original code from ff.py (Ilan Kogan)--
+	Returns data to plot ROC curve
+	:params y_target: The true label
+	:params y_probability: The predicted probability
+	:params path: Where to save the text file with ROC curve data
+	"""
+	fpr, tpr, thresholds = roc_curve(y_true = y_target, y_score = y_probability)
+
+	with open(path, 'w') as f:
+		f.write('FPR,TPR,THRESHOLDS')
+		for i in range(1, len(fpr), 500): # Ignoring first row due to arbitrary calculation, skipping rows for small file
+			f.write('\n' + str(fpr[i]) + ',' + str(tpr[i]) + ',' + str(thresholds[i]))
+
+	return fpr, tpr, thresholds
+
 
 def main(params, load_model=False, train_model=True, verbose=False):
 
@@ -881,11 +903,12 @@ def main(params, load_model=False, train_model=True, verbose=False):
     
     
     #   Test Loss
-    loss, y_pred_list, X_test_list, y_test_list = evaluate(dl_test, clf, onehot_encoder, params)
+    loss, y_pred_int_list, y_pred_prob_list, X_test_list, y_test_list = evaluate(dl_test, clf, onehot_encoder, params)
     
     #   flatten list3d to list2d
     y_test = [sample for batch in y_test_list for sample in batch]
-    y_pred = [sample for batch in y_pred_list for sample in batch]
+    y_pred_int = [sample for batch in y_pred_int_list for sample in batch]
+    y_pred_prob = [sample for batch in y_pred_prob_list for sample in batch]
 
 
     tn = -1
@@ -893,15 +916,27 @@ def main(params, load_model=False, train_model=True, verbose=False):
     fn = -1
     tp = -1
     accuracy = -1
+    tpr = -1
+    fpr = -1
+    thresholds = -1
 
     if data_type == 'binary':
         #   flatten list2d to list1d
         y_test_steps = [step for sample in y_test for step in sample]
-        y_pred_steps = [step for sample in y_pred for step in sample]
-    
-        # confusion matrix
-        tn, fp, fn, tp = confusion_matrix(y_test_steps, y_pred_steps).ravel()
-        accuracy = (tn + tp) / (tn + fp + fn + tp)  
+        y_pred_int_steps = [step for sample in y_pred_int for step in sample]
+        y_pred_prob_steps = [step for sample in y_pred_prob for step in sample]
+        
+        if params['con_mat'] is True:
+            # confusion matrix
+            print("Computing confusion matrix...")
+            tn, fp, fn, tp = confusion_matrix(y_test_steps, y_pred_int_steps).ravel()
+            accuracy = (tn + tp) / (tn + fp + fn + tp)  
+        
+        if params['roc'] is True:
+            # ROC
+            print("Computing ROC curve...")
+            ROC_path = save_dir + "test_roc_curve.csv"
+            fpr, tpr, thresholds = ROC(np.asarray(y_test_steps), np.asarray(y_pred_prob_steps), ROC_path)
     
     #   Test Report
     test_file = open(save_dir + params['test_report'] + "_" + str(dt.datetime.now()) + ".txt", "w")
@@ -909,17 +944,15 @@ def main(params, load_model=False, train_model=True, verbose=False):
     if data_type == 'scalar':
         for sample in range(0, len(y_test)):
             test_file.write("Label: " + str(float(y_test[sample])) + "    Predict: " +
-                            str(float(y_pred[sample])))
+                            str(float(y_pred_int[sample])))
         print("Loss: " + str(loss))
         
     else:
         for sample in range(0, len(y_test)):
             y_test_sample = int2phoneme(int_to_pho_dict, y_test[sample])
-            y_pred_sample = int2phoneme(int_to_pho_dict, y_pred[sample])
+            y_pred_sample = int2phoneme(int_to_pho_dict, y_pred_int[sample])
             test_file.write("Label: " + str(y_test_sample) + "\n")
             test_file.write("Predict: " +  str(y_pred_sample) + "\n")
-        
-    
     
     result_string = "Loss: " + str(loss) + "   TN: " + str(tn) + "    TP: " + str(tp) + \
               "     FP: " + str(fp) + "    FN: " + str(fn) + "    Accuracy: " + str(accuracy) + "\n"
@@ -944,7 +977,7 @@ if __name__ == '__main__':
     output_dim = dl_2.vocab_size
     
     
-    ce_weight = 15
+    ce_weight = 10
     save_dir = "./output/NN/LSTM/CE_" + str(ce_weight) + "_" + str(dt.datetime.now()) + "/"
     params = {
             'input_dim':                input_dim,
@@ -953,17 +986,19 @@ if __name__ == '__main__':
             'linear_dim':               40,            
             'output_dim':               output_dim,              
             'num_lstm_layers':          10,
-            'num_linear_layers':        10,
+            'num_linear_layers':        7,
             'batch_size':               256,
             'num_epochs':               300,
             'learning_rate':            1e-3,
             'learning_decay':           0,
             'cross_entropy_weight':     ce_weight,
-            'bidirectional':            False,
+            'bidirectional':            True,
             'align':                    alignment,
             'data_type':                data_type,
-            'save_epoch':               10,
+            'save_epoch':               50,
             'num_batches':              0,                      #   set to 0 or -1 for all batches
+            'con_mat':                  True,
+            'roc':                      True,
             'load_name':                'lstm_10.pth',
             'save_name':                'lstm_binary_model',
             'best_name':                'lstm_binary_best',
@@ -975,17 +1010,3 @@ if __name__ == '__main__':
 
     main(params, load_model=False, train_model=True, verbose=True)
     
-    
-    ce_weight = 5
-    save_dir = "./output/NN/LSTM/CE_" + str(ce_weight) + "_" + str(dt.datetime.now()) + "/"
-    params['cross_entropy_weight'] = ce_weight
-    params['save_dir'] = save_dir
-    
-    main(params, load_model=False, train_model=True, verbose=True)
-
-    ce_weight = 1
-    save_dir = "./output/NN/LSTM/CE_" + str(ce_weight) + "_" + str(dt.datetime.now()) + "/"
-    params['cross_entropy_weight'] = ce_weight
-    params['save_dir'] = save_dir
-    
-    main(params, load_model=False, train_model=True, verbose=True)
