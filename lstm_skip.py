@@ -48,6 +48,7 @@ Revisions:
                             Add in confusion matrix (only works for binary)
                             Fix predict for binary
     2019-04-24       (AY)   Add in ROC() code (from ff.py - Ilan Kogan) and modify existing code to work with ROC()
+                            Modified ROC() code to be suitable for fpr, tpr lengths of ~1000
                             
 
 Helpful Links:
@@ -587,7 +588,7 @@ def train(clf, onehot_encoder, params, show_validation=True, show_train=False):
                 val_loss = -1
             else:
                 #   Validation Loss
-                val_loss, y_pred_int_list, y_pred_prob_list, X_val_list, y_val_list = evaluate(dl_val, clf, onehot_encoder, params)
+                val_loss, y_pred_int_list, _, _, y_val_list = evaluate(dl_val, clf, onehot_encoder, params)
 
                 #   flatten list3d to list2d
                 y_val = [sample for batch in y_val_list for sample in batch]
@@ -843,21 +844,27 @@ def print_dictionary(filename, dictionary, save_dir):
     file.close()
 
 def ROC(y_target, y_probability, path):
-	"""
+    """
     ----Original code from ff.py (Ilan Kogan)--
-	Returns data to plot ROC curve
-	:params y_target: The true label
-	:params y_probability: The predicted probability
-	:params path: Where to save the text file with ROC curve data
-	"""
-	fpr, tpr, thresholds = roc_curve(y_true = y_target, y_score = y_probability)
-
-	with open(path, 'w') as f:
-		f.write('FPR,TPR,THRESHOLDS')
-		for i in range(1, len(fpr), 500): # Ignoring first row due to arbitrary calculation, skipping rows for small file
-			f.write('\n' + str(fpr[i]) + ',' + str(tpr[i]) + ',' + str(thresholds[i]))
-
-	return fpr, tpr, thresholds
+    Returns data to plot ROC curve
+    :params y_target: The true label
+    :params y_probability: The predicted probability
+    :params path: Where to save the text file with ROC curve data
+    """
+    fpr, tpr, thresholds = roc_curve(y_true = y_target, y_score = y_probability)
+    
+    print("FPR: ", len(fpr))
+    print("TPR: ", len(tpr))
+    
+    with open(path, 'w') as f:
+        f.write('FPR,TPR,THRESHOLDS')
+        if len(fpr) < 5000:
+            for i in range(1, len(fpr)):
+                f.write('\n' + str(fpr[i]) + ',' + str(tpr[i]) + ',' + str(thresholds[i]))
+        else:
+            for i in range(1, len(fpr), 500): # Ignoring first row due to arbitrary calculation, skipping rows for small file
+                f.write('\n' + str(fpr[i]) + ',' + str(tpr[i]) + ',' + str(thresholds[i]))
+    return fpr, tpr, thresholds
 
 
 def main(params, load_model=False, train_model=True, verbose=False):
@@ -926,6 +933,9 @@ def main(params, load_model=False, train_model=True, verbose=False):
         y_pred_int_steps = [step for sample in y_pred_int for step in sample]
         y_pred_prob_steps = [step for sample in y_pred_prob for step in sample]
         
+        print("y_test: ", len(y_test_steps))
+        print("y_pred: ", len(y_pred_prob_steps))
+        
         if params['con_mat'] is True:
             # confusion matrix
             print("Computing confusion matrix...")
@@ -936,7 +946,11 @@ def main(params, load_model=False, train_model=True, verbose=False):
             # ROC
             print("Computing ROC curve...")
             ROC_path = save_dir + "test_roc_curve.csv"
-            fpr, tpr, thresholds = ROC(np.asarray(y_test_steps), np.asarray(y_pred_prob_steps), ROC_path)
+            print(len(set(y_pred_prob_steps)))
+            y_test_array = np.asarray(y_test_steps)
+            y_pred_array = np.asarray(y_pred_prob_steps)
+        
+            fpr, tpr, thresholds = ROC(y_test_array, y_pred_array, ROC_path)
     
     #   Test Report
     test_file = open(save_dir + params['test_report'] + "_" + str(dt.datetime.now()) + ".txt", "w")
@@ -979,33 +993,34 @@ if __name__ == '__main__':
     
     ce_weight = 10
     save_dir = "./output/NN/LSTM/CE_" + str(ce_weight) + "_" + str(dt.datetime.now()) + "/"
+    load_dir = "./output/NN/LSTM/2019-04-24 Results/CE_10_2019-04-24 18:20:55.544339/"
     params = {
             'input_dim':                input_dim,
             'embed_dim':                input_dim,
-            'hidden_dim':               100,
+            'hidden_dim':               50,
             'linear_dim':               40,            
             'output_dim':               output_dim,              
-            'num_lstm_layers':          10,
-            'num_linear_layers':        7,
+            'num_lstm_layers':          20,
+            'num_linear_layers':        20,
             'batch_size':               256,
-            'num_epochs':               300,
+            'num_epochs':               100,
             'learning_rate':            1e-3,
             'learning_decay':           0,
             'cross_entropy_weight':     ce_weight,
-            'bidirectional':            True,
+            'bidirectional':            False,
             'align':                    alignment,
             'data_type':                data_type,
             'save_epoch':               50,
             'num_batches':              0,                      #   set to 0 or -1 for all batches
             'con_mat':                  True,
             'roc':                      True,
-            'load_name':                'lstm_10.pth',
+            'load_name':                'lstm_binary_best_5.pth',
             'save_name':                'lstm_binary_model',
             'best_name':                'lstm_binary_best',
             'train_report':             'lstm_binary_train',
             'test_report':              'lstm_binary_test',
             'save_dir':                 save_dir,
-            'load_dir':                 "NONE"
+            'load_dir':                 load_dir
     }
 
     main(params, load_model=False, train_model=True, verbose=True)
