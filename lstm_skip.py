@@ -30,6 +30,31 @@ Revisions:
                             Changed pad_token from 0 to the last dimension of 1-hot vector
                             Fixed padding truncation bug
                             Fixed seq_lens bug in tensors2packedseq() / packedseq2tensors()
+    **Separated from lstm.py**
+    2019-04-17      (AY)    Add in skip connections and ReLU Linear layers - runs with "full", "abridged", "binary"
+                            Skip connections do NOT work for scalar case because output of LSTM (num_layers x batch_size x hidden_dim) does 
+                                not align with embedding (seq_len x batch_size x hidden_dim)
+                            Changed all self.scalar if-statements to be based on self.data_type 
+                            Add params to reduce number of batches per epoch - not very efficient (seems like smaller the batch_size, longer it takes
+                                                                                                   to load dataloader)
+                            Add learning decay to Adam
+                            Add show_validation parameter for train() (does not work with small batch_size for some reason)
+                            Modify the training loop to load all training batches before beginning
+    2019-04-18       (AY)   Add show_train parameter for train() (might be buggy)
+                            Add params['cross_entropy_weight'] for weighting (only works for binary right now)
+                            Change file saving methods
+                            Change evaluate() to output all samples (list of list of list) 
+                            Fixed evaluate() for binary (see show_train)
+                            Add in confusion matrix (only works for binary)
+                            Fix predict for binary
+    2019-04-24       (AY)   Add in ROC() code (from ff.py - Ilan Kogan) and modify existing code to work with ROC()
+                            Modified ROC() code to be suitable for fpr, tpr lengths of ~1000
+                            Removed list() in Adam initialization for clf.parameters()
+                            Fixed training loop bug where only 1 batch was trained per epoch -- KEYYY!!!!!!
+                            Removed some unnecessary code which had to do with data_type = 'scalar'
+                            Modified test set to be evaluated with best epoch, not final epoch
+    2019-04-26       (AY)   Fixed load_dir bug in main()
+                            
 
 Helpful Links:
     PyTorch LSTM outputs : https://stackoverflow.com/questions/48302810/whats-the-difference-between-hidden-and-output-in-pytorch-lstm
@@ -52,6 +77,7 @@ from src.data_loader import DataLoader
 from sklearn.preprocessing import OneHotEncoder
 import datetime as dt
 from src.utils import int2phoneme
+from sklearn.metrics import confusion_matrix, roc_curve
 
 #   hide warnings
 if not sys.warnoptions:
@@ -61,7 +87,8 @@ if not sys.warnoptions:
 
 DATA_DIR = "./data/transcripts/"
 PHONEME_OUT = "./data/phonemes.txt"
-SAVE_DIR = "./output/NN/LSTM/"
+
+
 
 class lstm_rnn(nn.Module):
     
@@ -71,12 +98,14 @@ class lstm_rnn(nn.Module):
         self.input_dim = params['input_dim']
         self.embed_dim = params['embed_dim']
         self.hidden_dim = params['hidden_dim']
+        self.linear_dim1 = params['linear_dim']
         self.output_dim = params['output_dim']
         self.num_lstm_layers = params['num_lstm_layers']
+        self.num_linear_layers = params['num_linear_layers']
         self.bidirectional = params['bidirectional']
-        self.scalar = params['scalar']
         self.batch_size = params['batch_size']
-        
+        self.data_type = params['data_type']
+        self.loss_weight = params['cross_entropy_weight']
         self.hidden_states = self.init_hidden_states(self.bidirectional).cuda()
         self.cell_state = self.init_cell_state(self.bidirectional).cuda()
         
@@ -87,11 +116,24 @@ class lstm_rnn(nn.Module):
         self.lstm = nn.LSTM(self.embed_dim, self.hidden_dim, self.num_lstm_layers, 
                             bidirectional=self.bidirectional)    
 
-        #   Linear layers
         if self.bidirectional is True:
-            self.linear = nn.Linear(self.hidden_dim*2, self.output_dim)
+            self.in_linear_dim = self.hidden_dim * 2 + self.embed_dim           #   input linear dimension (out of LSTM + skip connection)
         else:
-            self.linear = nn.Linear(self.hidden_dim, self.output_dim)
+            self.in_linear_dim = self.hidden_dim + self.embed_dim
+        
+        if self.in_linear_dim <= self.linear_dim1:
+            print("WARNING: Hidden_dim (*2) + embed_dim is less than linear_dim1!!!")    
+        self.linear_dim2 = self.in_linear_dim - self.linear_dim1
+
+        #   list of linear layers       
+        self.first_linear = []
+        self.second_linear = []
+        for i in range(0, self.num_linear_layers):
+            self.first_linear.append(nn.Linear(self.in_linear_dim, self.linear_dim1).cuda())
+            self.second_linear.append(nn.Linear(self.linear_dim1, self.linear_dim2).cuda())
+
+        #   output linear layer (out of LSTM or linear layers + skip connection)
+        self.out_linear = nn.Linear(self.in_linear_dim + self.embed_dim, self.output_dim)
     
             
     def init_hidden_states(self, batch_size, bidirection=False):
@@ -124,9 +166,9 @@ class lstm_rnn(nn.Module):
         """
         Forward pass of model
         Arguments:
-            input:    input matrix of size(seq_length, batch_size, input_dim)
+            input:    input integer matrix of size(seq_length, batch_size, 1)
         Return:
-            y_pred:   predicted output of each sequence step
+            y_pred:   predicted output of each sequence step with padding (torch.tensor: max_seq_length x batch_size x output_dim)
         """
         
         batch_size = X.shape[0]
@@ -137,15 +179,15 @@ class lstm_rnn(nn.Module):
         
         #   X input shape (batch_size, max(seq_lens))
         #   output shape (batch_size x max(seq_lens) x embed_dim)
-        X = self.embedding(X.cuda())
+        embedded_X = self.embedding(X.cuda())
 
-        X = self.tensors2packedseq(X, seq_lens)
+        packed_X = self.tensors2packedseq(embedded_X, seq_lens)
     
         #   lstm_out is output for each t in sequence length T
         #   final_hidden_states are hidden_states for t=T
         #   final_cell_state is cell_state for t=T
 
-        lstm_out, (final_hidden_states, final_cell_state) = self.lstm(X, 
+        lstm_out, (final_hidden_states, final_cell_state) = self.lstm(packed_X, 
                   (self.hidden_states.cuda(), self.cell_state.cuda()))
                 
         #   convert lstm_out back to tensor from packedsequence
@@ -162,21 +204,22 @@ class lstm_rnn(nn.Module):
         #           final_hidden_states[-1] however will only output UP TO the seq_len
         #               where there is input (i.e. ignore all NULL outputs)
         
-        if self.scalar is True:
-            if self.bidirectional is True:
-                #   stack the hidden_states of the last reverse layer [-1] (leftmost) and the
-                #   last forward layer[-2] (rightmost)
-                final_hidden_state = torch.cat((final_hidden_states[-1], 
-                                                final_hidden_states[-2]), dim=1)
-            else:
-                final_hidden_state = final_hidden_states[-1]
-            y_pred = F.relu(self.linear(final_hidden_state))
-            #y_pred = torch.mul(y_pred, torch.tensor(seq_lens).unsqueeze(1).float().cuda())          #   scale to number of errors from error rate
-
+        in_linear = torch.cat((lstm_out, embedded_X.transpose(dim0=0, dim1=1)), dim=2).cuda()        #   concatenate to (max(seq_lens), batch_size, embed_dim+hidden_dim)
+        
+        #   linear layers
+        for layer in range(0, self.num_linear_layers):
+            linear1 = F.relu(self.first_linear[layer](in_linear))                     #   (max(seq_lens), batch_size, linear_dim)
+            linear2 = F.relu(self.second_linear[layer](linear1))                     #   (max(seq_lens), batch_size, embed_dim + hidden_dim - linear_dim)
+            in_linear = torch.cat((linear1, linear2), dim=2)                    #   (max(seq_lens), batch_size, embed_dim + hidden_dim)
+        
+        linear3 = torch.cat((in_linear, embedded_X.transpose(dim0=0, dim1=1)), dim=2)       #   (max(seq_lens), batch_size, embed_dim*2 + hidden_dim)
+        
+        if self.data_type == 'binary':
+            y_pred = F.sigmoid(self.out_linear(linear3))
         else:
             #   bidirectional lstm is already concatenated
-            y_pred = F.softmax(self.linear(lstm_out), dim=2)
-        
+            y_pred = F.softmax(self.out_linear(linear3), dim=2)
+
         return y_pred
         
     def compute_loss(self, y, target, seq_lens=[]):
@@ -191,8 +234,11 @@ class lstm_rnn(nn.Module):
         Returns:
             loss (torch.tensor) : MSE loss of y (self.scalar=True)
         """
-        if self.scalar is True:          
+         
+        
+        if self.data_type == 'scalar':          
             return F.mse_loss(y, target)
+        
         else:
             if len(seq_lens) != y.shape[1] or y.shape[1] != target.shape[1]: 
                 
@@ -204,7 +250,7 @@ class lstm_rnn(nn.Module):
                 return torch.tensor([-1])       #   causes an error :D
             
             for idx in range(0, y.shape[1]):         #   for every sample in batch
-                #   remove padding and flatten to 1D                
+                #   remove padding and flatten to 1D tensor               
                 y_tensor1D = y[:seq_lens[idx], idx, :].flatten()
                 target_tensor1D = target[:seq_lens[idx], idx, :].flatten()
                 
@@ -215,8 +261,13 @@ class lstm_rnn(nn.Module):
                 else:
                     y_flatten = torch.cat((y_flatten, y_tensor1D))
                     target_flatten = torch.cat((target_flatten, target_tensor1D))
-            
-            return F.binary_cross_entropy(y_flatten, target_flatten)
+
+            if self.data_type == 'binary':
+                weights = torch.where(target_flatten == 1, torch.tensor(self.loss_weight, dtype=torch.float).cuda(), torch.tensor(1, dtype=torch.float).cuda())
+                return F.binary_cross_entropy(y_flatten, target_flatten, weight=weights)
+            else:
+                weights = torch.where(target_flatten != y_flatten, torch.tensor(self.loss_weight, dtype=torch.float).cuda(), torch.tensor(1, dtype=torch.float).cuda())
+                return F.binary_cross_entropy(y_flatten, target_flatten, weight=weights)
 
 
     def tensors2packedseq(self, tensors, seq_lens, pad_token=0):
@@ -224,7 +275,7 @@ class lstm_rnn(nn.Module):
         Converts an ordered 3d padded tensor (with ORIGINALLY variable sequence lengths) to a PackedSequence
         datatype)
         Arguments:
-            tensors (torch.tensor) : padded input tensor of shape (batch_size, max_seq_len, input_dim)
+            tensors (torch.tensor) : padded input tensor of shape (batch_size, max_seq_len, embed_dim)
             seq_lens (list[int]) : unpadded sequence length of each tensor in tensors[a, :, :]
             pad_token (int) : value representing padding
         Returns:
@@ -233,10 +284,10 @@ class lstm_rnn(nn.Module):
 
         #   convert 3d tensor to list of 2d tensors
         tensor_list = []
-        for idx in range(tensors.shape[0]):                    #   for every sample in batch
+        for idx in range(tensors.shape[0]):                    #   for every sentence in batch
             tensor_list.append(tensors[idx, :seq_lens[idx], :])
-
-        packedseq = nn.utils.rnn.pad_sequence(tensor_list, padding_value=pad_token)  #   tensor (seq_len, batch_size, input_dim)
+    
+        packedseq = nn.utils.rnn.pad_sequence(tensor_list, padding_value=pad_token)  #   tensor (max_seq_len, batch_size, input_dim)
         packedseq = nn.utils.rnn.pack_padded_sequence(packedseq, seq_lens)
     
         return packedseq
@@ -250,7 +301,7 @@ class lstm_rnn(nn.Module):
             pad_token (int) : value representing padding
         Returns:
             tensors (torch.tensor) : padded input tensors of shape (seq_len, batch_size, input_dim)
-            seq_lens (torch.tensor) : tensor containing the seq_len of each input tensor (seq_len, )
+            seq_lens (torch.tensor) : tensor containing the seq_len of each input tensor (batch_size, )
         """       
         tensors, seq_lens = nn.utils.rnn.pad_packed_sequence(packedseq, padding_value=pad_token)
         tensors = tensors.contiguous()
@@ -307,6 +358,30 @@ def onehottensors2classlist(onehottensor, seq_lens):
     
     return batch_list
 
+def tensors2classlist(tensor, seq_lens):
+    """
+    Converts a 3d tensor (max(seq_len), batch_size, output_dim=1) to a 2d class list (list[batch_size  * list[seq_len]])
+    Arguments:
+        tensor (torch.tensor) : 3d padded tensor of different sequence lengths of
+            shape (max(seq_lens), batch_size, output_dim=1)
+        seq_lens (list[int]) : length of each of the sequences without padding 
+            (i.e. onehottensor.shape[1] without padding)
+    Returns:
+        batch_list (list[list[int]]) : list of class lists with each internal list corresponding
+            to a sequence and each class in the internal list corresponding to a class for 
+            each step of the sequence (or in sigmoid case, corresponds to the probability of positive class (1))
+    """
+    batch_list = []
+    
+    for idx in range(0, tensor.shape[1]):     # for every tensor sample in batch
+        value_list = []
+        tensor2d = tensor[:seq_lens[idx], idx, :]          # shape (seq_len, dim=1)
+        value_list = tensor2d.squeeze().tolist()
+        
+        batch_list.append(value_list)
+    
+    return batch_list
+
 def pad_lists(lists, pad_token, seq_lens_idx=[]):
     """
     Pads unordered lists of different lengths to all have the same length (max length) and orders
@@ -338,7 +413,7 @@ def pad_lists(lists, pad_token, seq_lens_idx=[]):
     return ordered_lists, ordered_seq_lens, seq_lens_idx
 
 
-def train(clf, onehot_encoder, params):
+def train(clf, onehot_encoder, params, show_validation=True, show_train=False):
     """
     Trains the model given training data.
     Arguments:
@@ -348,16 +423,19 @@ def train(clf, onehot_encoder, params):
         clf (class) : the trained model
     """
     num_epochs = params['num_epochs']
+    num_batches = params['num_batches']
     lr = params['learning_rate']
-    scalar = params['scalar']
+    ld = params['learning_decay']
+    data_type = params['data_type']
     input_dim = params['input_dim']
     output_dim = params['output_dim']
     filename = params['save_name']
     bestname = params['best_name']
     save_epoch = params['save_epoch']
+    save_dir = params['save_dir']
     
     #   name report file for writing
-    train_filename = SAVE_DIR + str(dt.datetime.now()) + "_" + params['train_report']
+    train_filename = save_dir + params['train_report'] + "_" + str(dt.datetime.now()) + ".txt"
     
     #   Create training data DataLoader
     dl_full = DataLoader(DATA_DIR, PHONEME_OUT, params['align'], 'full', 'val',
@@ -376,148 +454,234 @@ def train(clf, onehot_encoder, params):
     X_fixed = X_fixed_batch[2]
     y_fixed = y_fixed_batch[2]
     
+    
+    X_fixed_phoneme = int2phoneme(full_dict, X_fixed)
+    y_fixed_phoneme = int2phoneme(int_to_pho_dict, y_fixed)
+    print("X_fixed: ", X_fixed_phoneme)
+    print("y_fixed: ", y_fixed_phoneme)
+    
     #   restart validation dataloader
     dl_val = DataLoader(DATA_DIR, PHONEME_OUT, params['align'],
                     params['data_type'], 'val', batch_size = params['batch_size'])
     
     #   Create optimizer
-    optimizer = torch.optim.Adam(list(clf.parameters()), lr=lr)
+    optimizer = torch.optim.Adam(clf.parameters(), lr=lr, weight_decay=ld)
     
-    y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
+    #y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
 
-    X_fixed_phoneme = int2phoneme(full_dict, X_fixed)
-    y_fixed_phoneme = int2phoneme(int_to_pho_dict, y_fixed)
-    y_pred = int2phoneme(int_to_pho_dict, y_pred)
-    print("X_fixed: ", X_fixed_phoneme)
-    print("y_fixed: ", y_fixed_phoneme)
-    print("y_pred: ", y_pred)
+    #y_pred = int2phoneme(int_to_pho_dict, y_pred)
+    #print("y_pred: ", y_pred)
 
     #   best model parameters
     best_loss = 9999999999999           #   infinitely high
     best_epoch = -1
 
+    X_train_batches = []
+    y_train_batches = []
+
+    batch_count = 0
+    
+    for X_train, y_train in dl_train:
+        X_train_batches.append(X_train)
+        y_train_batches.append(y_train)
+        batch_count += 1
+        #   stops getting batches when more than num_batches
+        #   continue getting batches if num_batch <= 0
+        if batch_count >= num_batches and num_batches > 0:
+            break
+
     for epoch in range(0, num_epochs):
         try:
-            batch_idx = 0        
             print("Epoch: " + str(epoch) + "     " + str(dt.datetime.now()))
             
-            sum_train_loss = 0
+            sum_train_loss = 0          #   accumulated loss of entire training epoch
             sum_train_iters = 0
             
             #   open report file for writing
             train_file = open(train_filename, "a+")
-            
-            for X_train, y_train in dl_train:
-                #   theoretically, the padding token doesn't matter since its embedded version will be removed by sequence length
-                X_train_batch, X_train_seq_lens, seq_lens_idx = pad_lists(X_train, pad_token=input_dim-1)
-                X_train_batch = torch.tensor(X_train_batch).cuda()   
-                        
-                if scalar is True:
-                    #   sort y_train_batch
-                    y_train_batch = torch.tensor([[y_train[idx]] for idx in seq_lens_idx]).float().cuda()
-                else:
-                    #   convert list[list[int]] to padded 3d tensor (seq_len, batch_size, output_dim)                
-                    y_train_batch, y_train_seq_lens, seq_lens_idx = pad_lists(y_train, pad_token=output_dim-1,
-                                                                              seq_lens_idx=seq_lens_idx)
-                    y_train_batch = lists2onehottensors(y_train_batch, output_dim, onehot_encoder)
+  
+            for batch in range(0, len(X_train_batches)):
                 
                 #   Zero the gradient of the optimizer
                 optimizer.zero_grad()
                 
+                X_train = X_train_batches[batch]
+                y_train = y_train_batches[batch]
+                
+                
+                #   theoretically, the padding token doesn't matter since its embedded version will be removed by sequence length
+                X_train_batch, X_train_seq_lens, seq_lens_idx = pad_lists(X_train, pad_token=input_dim-1)
+                X_train_batch = torch.tensor(X_train_batch).cuda()   
+            
+                #   convert list[list[int]] to padded 3d tensor (seq_len, batch_size, output_dim)           
+                if data_type == 'binary':
+                    y_train_batch, y_train_seq_lens, seq_lens_idx = pad_lists(y_train, pad_token=2,
+                                                                          seq_lens_idx=seq_lens_idx)
+                    y_train_batch = torch.tensor([y_train_batch]).cuda().float().cuda()
+                    y_train_batch = y_train_batch.transpose(dim0=0, dim1=2)
+                else:
+                    y_train_batch, y_train_seq_lens, seq_lens_idx = pad_lists(y_train, pad_token=output_dim-1,
+                                                                          seq_lens_idx=seq_lens_idx)
+                    y_train_batch = lists2onehottensors(y_train_batch, output_dim, onehot_encoder)
+
                 #   Forward pass
                 y_pred = clf.forward(X_train_batch, X_train_seq_lens)
                 loss = clf.compute_loss(y_pred, y_train_batch, X_train_seq_lens)
-            
+
                 sum_train_loss += loss.item()
                 sum_train_iters += 1
-            
+
                 loss.backward()     #   backward pass
                 optimizer.step()    #   update gradient step
                 
-                batch_idx += 1
+                #   show_train function might be buggy.  Use at your own risk
+                if show_train is True and epoch % save_epoch == 0:
+                    if data_type == 'binary':
+                        y_train_batch = tensors2classlist(y_train_batch, X_train_seq_lens)
+                        y_pred = tensors2classlist(y_pred, X_train_seq_lens)                    #   list of a list
+                        y_pred_int = []
+                        for lst in y_pred:
+                            y_pred_int.append([int(round(lst[i])) for i in range(0, len(lst))])    # convert floats (from sigmoid) to integers (binary)
+                        y_pred = y_pred_int
+                    else:
+                        y_train_batch = onehottensors2classlist(y_train_batch, X_train_seq_lens)
+                        y_pred = onehottensors2classlist(y_pred, X_train_seq_lens)
+                    for sample in range(0, len(y_train_batch)):
+                        y_train_sample = int2phoneme(int_to_pho_dict, y_train_batch[sample])
+                        y_pred_sample = int2phoneme(int_to_pho_dict, y_pred[sample])
+                        print("Label: ", y_train_sample)
+                        print("Predict: ", y_pred_sample)
     
             #   Average training loss
             train_loss = float(sum_train_loss) / sum_train_iters
-    
-            #   Validation Loss
-            val_loss, y_pred, X_val, y_val = evaluate(dl_val, clf, onehot_encoder, params)
             
-            print("Training Loss: " + str(train_loss) + "    Val Loss: " + str(val_loss))
-            train_file.write("Epoch: " + str(epoch) + "    Training Loss: " + str(train_loss) + 
-                             "    Val Loss: " + str(val_loss) + "\n")
-            train_file.close()          #   close file after writing to save
+            tn = -1
+            fp = -1
+            fn = -1
+            tp = -1
+            accuracy = -1
             
-            #   print fixed validation case
-            y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
-            y_pred = int2phoneme(int_to_pho_dict, y_pred)
-            print(y_pred)
-    
-            #   save progress
-            if epoch % save_epoch == 0:
-                checkpoint = {'model': lstm_rnn(params),
-                              'state_dict': clf.state_dict(),
-                              'optimizer': optimizer.state_dict()}
-                file =  SAVE_DIR + filename + "_" + str(epoch) + ".pth"
-                torch.save(checkpoint, file)
+            if show_validation is False:
+                print("Training Loss: " + str(train_loss))
+                val_loss = -1
+            else:
+                #   Validation Loss
+                val_loss, y_pred_int_list, _, _, y_val_list = evaluate(dl_val, clf, onehot_encoder, params)
+
+                #   flatten list3d to list2d [batch_size [seq_len]]
+                y_val = [sample for batch in y_val_list for sample in batch]
+                y_pred = [sample for batch in y_pred_int_list for sample in batch]
                 
+                if data_type == 'binary':
+                    #   flatten list2d to list1d
+                    y_val_steps = [step for sample in y_val for step in sample]
+                    y_pred_steps = [step for sample in y_pred for step in sample]
+                    # confusion matrix
+                    tn, fp, fn, tp = confusion_matrix(y_val_steps, y_pred_steps).ravel()
+                    accuracy = (tn + tp) / (tn + fp + fn + tp)
+            
+                #   print fixed validation case
+                y_pred = predict(X_fixed, y_fixed, clf, onehot_encoder, params)
+                y_pred = int2phoneme(int_to_pho_dict, y_pred)
+                print(y_pred)
+                
+                    
             if best_loss > val_loss:
                 best_checkpoint = {'model': lstm_rnn(params),
                               'state_dict': clf.state_dict(),
                               'optimizer': optimizer.state_dict()}
                 best_epoch = epoch
                 best_loss = val_loss
+                best_clf = clf
+                
+            print("Training Loss: " + str(train_loss) + "    Val Loss: " + str(val_loss))
+            train_file.write("Epoch: " + str(epoch) + "    Training Loss: " + str(train_loss) + 
+                             "    Val Loss: " + str(val_loss) + "   TN: " + str(tn) + "    TP: " + str(tp)
+                             + "     FP: " + str(fp) + "    FN: " + str(fn) + "    Accuracy: " + str(accuracy) + 
+                             "\n")
+            train_file.close()          #   close file after writing to save
+            
+            #   save progress
+            if epoch % save_epoch == 0:
+                checkpoint = {'model': lstm_rnn(params),
+                              'state_dict': clf.state_dict(),
+                              'optimizer': optimizer.state_dict()}
+                file =  save_dir + filename + "_" + str(epoch) + "_" + str(round(train_loss,4)) + ".pth"
+                torch.save(checkpoint, file)
         
         except KeyboardInterrupt:
             print("Exiting training loop early...")
             #   save best checkpoint
-            file =  SAVE_DIR + bestname + "_" + str(best_epoch) + ".pth"
+            best_filename = bestname + "_" + str(best_epoch) + ".pth"
+            file =  save_dir + best_filename
             torch.save(best_checkpoint, file)
             print("Best Val Loss at Epoch " + str(best_epoch) + ": " + str(best_loss))
             break
     
     #   save best checkpoint
-    file =  SAVE_DIR + bestname + "_" + str(best_epoch) + ".pth"
+    best_filename = bestname + "_" + str(best_epoch) + ".pth"
+    file =  save_dir + best_filename
     torch.save(best_checkpoint, file)
     print("Best Val Loss at Epoch " + str(best_epoch) + ": " + str(best_loss))
         
-    return clf
+    return clf, best_clf
 
 def evaluate(dataloader, clf, onehot_encoder, params):
     
-    scalar = params['scalar']
+    data_type = params['data_type']
     input_dim = params['input_dim']
     output_dim = params['output_dim']
     
     sum_loss = 0
     num_iters = 0
     
-    for X_test, y_test in dataloader:
+    X_test_list = []
+    y_test_list = []
+    y_pred_int_list = []
+    y_pred_prob_list = []
+    
+    for X_test, y_test in dataloader:           #   for each batch
     
         X_test_batch, X_test_seq_lens, seq_lens_idx = pad_lists(X_test, pad_token=input_dim-1)
         X_test_batch = torch.tensor(X_test_batch)
         
-        if scalar is True:
-            #   sort y_train_batch
-            y_test_batch = torch.tensor([[y_test[idx]] for idx in seq_lens_idx]).float().cuda()
+        #   convert list[list[int]] to padded 3d tensor (seq_len, batch_size, output_dim)
+        y_test_batch, y_test_seq_lens, seq_lens_idx = pad_lists(y_test, pad_token=output_dim-1,
+                                                                seq_lens_idx=seq_lens_idx)        
+        if data_type == 'binary':
+            y_test_batch = torch.tensor([y_test_batch]).cuda().float().cuda()
+            y_test_batch = y_test_batch.transpose(dim0=0, dim1=2)
         else:
-            #   convert list[list[int]] to padded 3d tensor (seq_len, batch_size, output_dim)
-            y_test_batch, y_test_seq_lens, seq_lens_idx = pad_lists(y_test, pad_token=output_dim-1,
-                                                                    seq_lens_idx=seq_lens_idx)        
             y_test_batch = lists2onehottensors(y_test_batch, output_dim, onehot_encoder)
-            
+        
         y_pred = clf.forward(X_test_batch, X_test_seq_lens)
         loss = clf.compute_loss(y_pred, y_test_batch, X_test_seq_lens)
         sum_loss += loss.item()
         num_iters += 1
         
-        if scalar is False:
+        if data_type == 'binary':
+            y_test_batch = tensors2classlist(y_test_batch, X_test_seq_lens)
+            y_pred = tensors2classlist(y_pred, X_test_seq_lens)
+            y_pred_int = []
+            y_pred_prob = []
+            for lst in y_pred:      #   for each sample in batch
+                y_pred_int.append([int(round(lst[i])) for i in range(0, len(lst))])    # convert floats (from sigmoid) to integers (binary)
+                y_pred_prob.append([lst[i] for i in range(0, len(lst))])
+        else:
             #   convert softmax y_pred and y to 1d list
             y_test_batch = onehottensors2classlist(y_test_batch, X_test_seq_lens)
-            y_pred = onehottensors2classlist(y_pred, X_test_seq_lens)
+            y_pred_int = onehottensors2classlist(y_pred, X_test_seq_lens)
+            y_pred_prob = []                #   nothing
     
-    loss = sum_loss / num_iters
+        #   these are 3d lists [num_batch [batch_size [seq_lens]]]
+        X_test_list.append(X_test_batch)
+        y_test_list.append(y_test_batch)
+        y_pred_int_list.append(y_pred_int)
+        y_pred_prob_list.append(y_pred_prob)
     
-    return loss, y_pred, X_test_batch, y_test_batch
+    loss = sum_loss / num_iters             #   average loss over entire test set
+    
+    return loss, y_pred_int_list, y_pred_prob_list, X_test_list, y_test_list
 
 def predict(X, y, clf, onehot_encoder, params):
     """
@@ -528,30 +692,40 @@ def predict(X, y, clf, onehot_encoder, params):
     Returns:
         y_pred (list[int]) : a list of integers with each integer the prediction of each step
     """
-    scalar = params['scalar']
+    data_type = params['data_type']
     output_dim = params['output_dim']
     
     X = torch.tensor(X).cuda()         #   shape(seq_len,)
     X = X.unsqueeze(0)          #   shape(batch_size=1, seq_len)
     
-    if scalar is True:
+    if data_type == 'scalar':
         seq_len = [X.shape[1]]
     else:
         seq_len = [len(y)]              #   2d list
     
-    if scalar is True:
+    if data_type == 'scalar' or data_type == 'binary':
         y = torch.tensor([[y]]).cuda().float().cuda()         #   shape(1,)
+        if data_type == 'binary':
+            y = y.transpose(dim0=0, dim1=2)                     #   transpose to match shape of y_pred
     else:
         y = lists2onehottensors([y], output_dim, onehot_encoder)
         #   change to 1-hot
 
     y_pred = clf.forward(X, seq_len)
+
     loss = clf.compute_loss(y_pred, y, seq_len)
     loss = loss.item()
     
-    if scalar is False:
+    if data_type != 'scalar':
         #   convert softmax y_pred and y to 1d list
-        y_pred = onehottensors2classlist(y_pred, seq_len)[0]
+        if data_type == 'binary':
+            y_pred = tensors2classlist(y_pred, seq_len)[0]
+            y_pred_int = []
+            for value in y_pred:
+                y_pred_int.append(round(value))    # convert floats (from sigmoid) to integers (binary)
+            y_pred = y_pred_int
+        else:
+            y_pred = onehottensors2classlist(y_pred, seq_len)[0]
     
     return y_pred
 
@@ -615,42 +789,84 @@ def create_sample_data(params, min_seq_len=3, max_seq_len=10, scalar=True, shuff
 
     return X, y
 
-def load_checkpoint(filename):
+def load_checkpoint(filename, load_dir):
     """
     Loads a saved model
     Arugments:
-        filename (str) : name of file in SAVE_DIR
+        filename (str) : name of file in load_dir
     Returns
         model : saved model in filename
     """
-    checkpoint = torch.load(SAVE_DIR + filename)
+    checkpoint = torch.load(load_dir + filename)
     model = checkpoint['model']
     model.load_state_dict(checkpoint['state_dict'])
     #for parameter in model.parameters():
     #    parameter.requires_grad = False
     #model.eval()
     return model
+
+def print_dictionary(filename, dictionary, save_dir):
+    """
+    Print the contents of dictionary to filename
+    """
+    file = open(save_dir + filename + "_" + str(dt.datetime.now()) + ".txt", "w")
     
+    print("Saving parameters to file...")
+    
+    for key in dictionary:
+        file.write(key + " : " + str(dictionary[key]) + "\n")
+    
+    file.close()
+
+def ROC(y_target, y_probability, path):
+    """
+    ----Original code from ff.py (Ilan Kogan)--
+    Returns data to plot ROC curve
+    :params y_target: The true label
+    :params y_probability: The predicted probability
+    :params path: Where to save the text file with ROC curve data
+    """
+    fpr, tpr, thresholds = roc_curve(y_true = y_target, y_score = y_probability)
+    
+    print("Length of FPR: ", len(fpr))
+    print("Length of TPR: ", len(tpr))
+    
+    with open(path, 'w') as f:
+        f.write('FPR,TPR,THRESHOLDS')
+        if len(fpr) < 5000:
+            for i in range(1, len(fpr)):
+                f.write('\n' + str(fpr[i]) + ',' + str(tpr[i]) + ',' + str(thresholds[i]))
+        else:
+            for i in range(1, len(fpr), 500): # Ignoring first row due to arbitrary calculation, skipping rows for small file
+                f.write('\n' + str(fpr[i]) + ',' + str(tpr[i]) + ',' + str(thresholds[i]))
+    return fpr, tpr, thresholds
+
 
 def main(params, load_model=False, train_model=True, verbose=False):
-    
-    scalar = params['scalar']
+
+    data_type = params['data_type']
     output_dim = params['output_dim']
+    save_dir = params['save_dir']
+    load_dir = params['load_dir']
+    
+    os.mkdir(save_dir)
+    
+    print_dictionary("params", params, params['save_dir'])
     
     #   initialize classifier
     if verbose:
         print("Initializing classifier...")
     
     #   checks
-    if scalar is True and params['output_dim'] != 1:
-        print("WARNING: Scalar is True but output dim is NOT set to 1...")
+    if (data_type == 'scalar' or data_type == 'binary') and output_dim != 1:
+        print("WARNING: Scalar/Binary is True but output dim is NOT set to 1...")
         print("Automatically setting to 1...")
         params['output_dim'] = 1
     
     #   Create model
     if load_model is True:
         print("Loading model...")
-        clf = load_checkpoint(params['load_name']).cuda()
+        clf = load_checkpoint(params['load_name'], load_dir).cuda()
     else:
         print("Initializing model...")
         clf = lstm_rnn(params).cuda()
@@ -660,45 +876,90 @@ def main(params, load_model=False, train_model=True, verbose=False):
     
     #   Train model    
     if train_model is True:
-        clf = train(clf, onehot_encoder, params)
+        clf, best_clf = train(clf, onehot_encoder, params)
     
     #   Evaluate model - outputs X_test,  y_test because ordered inside of evaluate
     
+    if train_model is True:
+        print("Loading best model...")
+        clf = best_clf
+    
     dl_test = DataLoader(DATA_DIR, PHONEME_OUT, params['align'],
                     params['data_type'], 'test', batch_size = params['batch_size'])
+    int_to_pho_dict = dl_test.int_to_phoneme
     
-    #   Test Loss
-    loss, y_pred, X_test, y_test = evaluate(dl_test, clf, onehot_encoder, params)
+    #   Test Loss and list3d's [num_batch[batch_size[seq_len]]]
+    loss, y_pred_int_list, y_pred_prob_list, X_test_list, y_test_list = evaluate(dl_test, clf, onehot_encoder, params)
+    
+    #   flatten list3d to list2d
+    y_test = [sample for batch in y_test_list for sample in batch]
+    y_pred_int = [sample for batch in y_pred_int_list for sample in batch]
+    y_pred_prob = [sample for batch in y_pred_prob_list for sample in batch]
+
+
+    tn = -1
+    fp = -1
+    fn = -1
+    tp = -1
+    accuracy = -1
+    tpr = -1
+    fpr = -1
+    thresholds = -1
+
+    if data_type == 'binary':
+        #   flatten list2d to list1d
+        y_test_steps = [step for sample in y_test for step in sample]
+        y_pred_int_steps = [step for sample in y_pred_int for step in sample]
+        y_pred_prob_steps = [step for sample in y_pred_prob for step in sample]
+        
+        print("# of phonemes in y_test: ", len(y_test_steps))
+        print("# of phonemes in y_pred: ", len(y_pred_prob_steps))
+        
+        if params['con_mat'] is True:
+            # confusion matrix
+            print("Computing confusion matrix...")
+            tn, fp, fn, tp = confusion_matrix(y_test_steps, y_pred_int_steps).ravel()
+            accuracy = (tn + tp) / (tn + fp + fn + tp)  
+        
+        if params['roc'] is True:
+            # ROC
+            print("Computing ROC curve...")
+            ROC_path = save_dir + "test_roc_curve.csv"
+            print("# of unique probability values in y_pred : ", len(set(y_pred_prob_steps)))
+            y_test_array = np.asarray(y_test_steps)
+            y_pred_array = np.asarray(y_pred_prob_steps)
+        
+            fpr, tpr, thresholds = ROC(y_test_array, y_pred_array, ROC_path)
     
     #   Test Report
-    test_file = open(SAVE_DIR + str(dt.datetime.now()) + "_" 
-                          + params['test_report'], "w")
+    test_file = open(save_dir + params['test_report'] + "_" + str(dt.datetime.now()) + ".txt", "w")
     
-    if scalar is True:
+    if data_type == 'scalar':
         for sample in range(0, len(y_test)):
-            print("Label: ", float(y_test[sample]), "    Predict: ", float(y_pred[sample]))
             test_file.write("Label: " + str(float(y_test[sample])) + "    Predict: " +
-                            str(float(y_pred[sample])))
+                            str(float(y_pred_int[sample])))
         print("Loss: " + str(loss))
         
     else:
         for sample in range(0, len(y_test)):
-            print("Label: ", y_test[sample])
-            print("Predict: ", y_pred[sample])
-            test_file.write("Label: " + str(y_test[sample]))
-            test_file.write("Predict: " +  str(y_pred[sample]))
-        print("Loss: ", str(loss))
+            y_test_sample = int2phoneme(int_to_pho_dict, y_test[sample])
+            y_pred_sample = int2phoneme(int_to_pho_dict, y_pred_int[sample])
+            test_file.write("Label: " + str(y_test_sample) + "\n")
+            test_file.write("Predict: " +  str(y_pred_sample) + "\n")
     
-    test_file.write("Loss: " + str(loss))
+    result_string = "Loss: " + str(loss) + "   TN: " + str(tn) + "    TP: " + str(tp) + \
+              "     FP: " + str(fp) + "    FN: " + str(fn) + "    Accuracy: " + str(accuracy) + "\n"
+
+    print(result_string)
+    test_file.write(result_string)
     test_file.close()
     
 if __name__ == '__main__':
     
     #torch.manual_seed = 1
     alignment = 'hypothesis'
-    data_type = 'scalar'
+    data_type = 'binary'
 
-    
     #   get input dim (always 44)
     dl_1 = DataLoader(DATA_DIR, PHONEME_OUT, alignment, 'full', 'val', batch_size=4)
     input_dim = dl_1.vocab_size
@@ -708,27 +969,45 @@ if __name__ == '__main__':
                     data_type, 'val', batch_size = 4)
     output_dim = dl_2.vocab_size
     
+    
+    ce_weight = 10
+    save_dir = "./output/NN/LSTM/CE_" + str(ce_weight) + "_" + str(dt.datetime.now()) + "/"
+    load_dir = "./output/NN/LSTM/CE_10_2019-04-25 00:14:01.112547/"
     params = {
-            'input_dim':            input_dim,
-            'embed_dim':            input_dim,
-            'hidden_dim':           25,            
-            'output_dim':           output_dim,              
-            'num_lstm_layers':      1,
-            'num_linear_layers':    2,
-            'batch_size':           256,
-            'num_epochs':           200,
-            'learning_rate':        0.05,
-            'learning_decay':       0.9,
-            'bidirectional':        True,
-            'scalar':               True,
-            'align':                alignment,
-            'data_type':            data_type,
-            'save_epoch':           10,
-            'load_name':            'lstm_10.pth',
-            'save_name':            'lstm_scalar',
-            'best_name':            'lstm_scalar_best',
-            'train_report':         'lstm_scalar_report.txt',
-            'test_report':          'lstm_scalar_test.txt'
+            'input_dim':                input_dim,
+            'embed_dim':                input_dim,
+            'hidden_dim':               50,
+            'linear_dim':               40,            
+            'output_dim':               output_dim,              
+            'num_lstm_layers':          10,
+            'num_linear_layers':        10,
+            'batch_size':               256,
+            'num_epochs':               80,
+            'learning_rate':            5e-4,
+            'learning_decay':           0,
+            'cross_entropy_weight':     ce_weight,
+            'bidirectional':            True,
+            'align':                    alignment,
+            'data_type':                data_type,
+            'save_epoch':               50,
+            'num_batches':              0,                      #   set to 0 or -1 for all batches
+            'con_mat':                  True,
+            'roc':                      True,
+            'load_name':                'lstm_binary_best_3.pth',
+            'save_name':                'lstm_binary_model',
+            'best_name':                'lstm_binary_best',
+            'train_report':             'lstm_binary_train',
+            'test_report':              'lstm_binary_test',
+            'save_dir':                 save_dir,
+            'load_dir':                 load_dir
     }
 
-    main(params, load_model=False, train_model=True, verbose=True)
+    #main(params, load_model=False, train_model=True, verbose=True)
+    
+    changed_params = params
+    ce_weight = 10
+    save_dir = "./output/NN/LSTM/CE_" + str(ce_weight) + "_" + str(dt.datetime.now()) + "/"
+    changed_params['save_dir'] = save_dir
+    changed_params['num_lstm_layers'] = 1
+    changed_params['num_linear_layers'] = 0
+    main(changed_params, load_model=False, train_model=True, verbose=True)
