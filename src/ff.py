@@ -348,7 +348,7 @@ def investigate_data(model_parameters, path):
 	batch_size = model_parameters['batch_size']
 
 	train_data = DataLoader(DATA_DIR, PHONEME_OUT, 'hypothesis', 'binary', 'train', batch_size = batch_size)
-	int_to_phoneme = dict((v,k) for k,v in train_data.phoneme_to_int.items())
+	#int_to_phoneme = dict((v,k) for k,v in train_data.phoneme_to_int.items())
 
 	cnt_correct = Counter()
 	cnt_incorrect = Counter()
@@ -375,15 +375,16 @@ model_parameters = {
 	'num_epochs':		100,
 	'batch_size':		32,
 	'error_weight':		10,
-	'weights_path':		'C:/Users/Ilan/Desktop/MSc Statistics/Neural Networks/Final Project Code/models/',
-	'data_dir':			'C:/Users/Ilan/Desktop/MSc Statistics/Neural Networks/Final Project Code/data/transcripts/',
-	'phoneme_out':		'C:/Users/Ilan/Desktop/MSc Statistics/Neural Networks/Final Project Code/data/phonemes.txt',
-	'roc_location':		'C:/Users/Ilan/Desktop/MSc Statistics/Neural Networks/Final Project Code/diagrams/roc.csv',
+	'weights_path':		'../models/',
+	'data_dir':			'../data/transcripts/',
+	'phoneme_out':		'../data/phonemes.txt',
+	'roc_location':		'../roc.csv',
 	'print_batch':		100,
 	'loss_multiplier':	10**3,
 	'save_epoch':		1
 }
 
-#train(model_parameters)
-#investigate_model(model_parameters, file = 'epoch_7_1135.176.weights')
-investigate_data(model_parameters, 'C:/Users/Ilan/Desktop/MSc Statistics/Neural Networks/Final Project Code/diagrams/phoneme_frequency.csv')
+
+train(model_parameters)
+investigate_model(model_parameters, file = 'epoch_7_1135.176.weights')
+#investigate_data(model_parameters, '../diagrams/phoneme_frequency.csv')
