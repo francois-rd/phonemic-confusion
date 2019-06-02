@@ -54,6 +54,7 @@ Revisions:
                             Removed some unnecessary code which had to do with data_type = 'scalar'
                             Modified test set to be evaluated with best epoch, not final epoch
     2019-04-26       (AY)   Fixed load_dir bug in main()
+    2019-06-02       (AY)   Changed self.linears to nn.ModuleList from regular list  (results not tested)
                             
 
 Helpful Links:
@@ -126,8 +127,8 @@ class lstm_rnn(nn.Module):
         self.linear_dim2 = self.in_linear_dim - self.linear_dim1
 
         #   list of linear layers       
-        self.first_linear = []
-        self.second_linear = []
+        self.first_linear = nn.ModuleList()
+        self.second_linear = nn.ModuleList()
         for i in range(0, self.num_linear_layers):
             self.first_linear.append(nn.Linear(self.in_linear_dim, self.linear_dim1).cuda())
             self.second_linear.append(nn.Linear(self.linear_dim1, self.linear_dim2).cuda())
@@ -979,10 +980,10 @@ if __name__ == '__main__':
             'hidden_dim':               50,
             'linear_dim':               40,            
             'output_dim':               output_dim,              
-            'num_lstm_layers':          10,
-            'num_linear_layers':        10,
+            'num_lstm_layers':          1,
+            'num_linear_layers':        1,
             'batch_size':               256,
-            'num_epochs':               80,
+            'num_epochs':               100,
             'learning_rate':            5e-4,
             'learning_decay':           0,
             'cross_entropy_weight':     ce_weight,
@@ -1002,7 +1003,7 @@ if __name__ == '__main__':
             'load_dir':                 load_dir
     }
 
-    #main(params, load_model=False, train_model=True, verbose=True)
+    main(params, load_model=False, train_model=True, verbose=True)
     
     changed_params = params
     ce_weight = 10
@@ -1010,4 +1011,4 @@ if __name__ == '__main__':
     changed_params['save_dir'] = save_dir
     changed_params['num_lstm_layers'] = 1
     changed_params['num_linear_layers'] = 0
-    main(changed_params, load_model=False, train_model=True, verbose=True)
+    #main(changed_params, load_model=False, train_model=True, verbose=True)
